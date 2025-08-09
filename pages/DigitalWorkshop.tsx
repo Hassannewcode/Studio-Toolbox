@@ -1,8 +1,9 @@
 
 
+
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Type, Chat } from '@google/genai';
-import { generateJson, generateText, createChat, sendMessageStream } from '../services/geminiService';
+import { generateJson, generateText, createChat, sendMessageStream, simulateExecution } from '../services/geminiService';
 import usePersistentState from '../hooks/usePersistentState';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -18,12 +19,12 @@ import { TerminalIcon } from '../components/icons/TerminalIcon';
 import { ChatBubbleBottomCenterTextIcon } from '../components/icons/ChatBubbleBottomCenterTextIcon';
 import { SparklesIcon } from '../components/icons/SparklesIcon';
 import { ArrowPathIcon } from '../components/icons/ArrowPathIcon';
-import { CogIcon } from '../components/icons/CogIcon';
 import { Input } from '../components/ui/Input';
 import { type ChatMessage } from '../types';
 import { ArrowsPointingOutIcon } from '../components/icons/ArrowsPointingOutIcon';
 import { ArrowsPointingInIcon } from '../components/icons/ArrowsPointingInIcon';
 import { PaintBrushIcon } from '../components/icons/PaintBrushIcon';
+import { PlayIcon } from '../components/icons/PlayIcon';
 
 
 const blueprintSchema = {
@@ -74,7 +75,8 @@ interface ConsoleMessage {
 }
 
 type BuildStage = 'ideation' | 'blueprint_review' | 'build';
-type ActiveSideTab = 'chat' | 'console' | 'settings';
+type ActiveSideTab = 'chat' | 'console';
+type ActiveOutputTab = 'preview' | 'terminal';
 
 interface WorkshopState {
     goal: string;
@@ -86,11 +88,13 @@ interface WorkshopState {
     consoleMessages: ConsoleMessage[];
     activeSideTab: ActiveSideTab;
     isPreviewFullscreen: boolean;
-    showPreview: boolean;
+    showOutputPanel: boolean;
+    activeOutputTab: ActiveOutputTab;
+    terminalOutput: string;
 }
 
 const initialWorkshopState: WorkshopState = {
-    goal: 'A simple single-page app for managing a to-do list. It should have a clean interface with an input field to add tasks and a list to display them. Use TailwindCSS for styling.',
+    goal: 'A simple python flask API that has one route /hello that returns {"message": "hello world"}',
     stage: 'ideation',
     blueprint: null,
     blueprintText: '',
@@ -99,7 +103,9 @@ const initialWorkshopState: WorkshopState = {
     consoleMessages: [],
     activeSideTab: 'chat',
     isPreviewFullscreen: false,
-    showPreview: true,
+    showOutputPanel: true,
+    activeOutputTab: 'preview',
+    terminalOutput: ''
 };
 
 const ChatMessageDisplay: React.FC<{ 
@@ -157,7 +163,7 @@ const ChatMessageDisplay: React.FC<{
 
 
 const DigitalWorkshop: React.FC = () => {
-  const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v5', initialWorkshopState);
+  const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v6', initialWorkshopState);
   
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
@@ -171,7 +177,7 @@ const DigitalWorkshop: React.FC = () => {
   const [previewKey, setPreviewKey] = useState(Date.now());
 
 
-  const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, activeSideTab, isPreviewFullscreen, showPreview } = workshopState;
+  const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, activeSideTab, isPreviewFullscreen, showOutputPanel, activeOutputTab, terminalOutput } = workshopState;
   
   const selectedFile = projectFiles.find(f => f.fileName === selectedFileName) || null;
   const previewFile = projectFiles.find(f => f.fileName.toLowerCase() === 'index.html');
@@ -200,7 +206,7 @@ When asked to provide code, use markdown code blocks. The user can apply your co
     setChatMessages([]);
     logToConsole('Starting project generation...');
     try {
-      const blueprintPrompt = `Generate a project blueprint for the following request: "${goal}". The project should be self-contained and runnable where possible. Prioritize a single, self-contained 'index.html' file for simple web UIs. For React, an index.tsx is acceptable.`;
+      const blueprintPrompt = `Generate a project blueprint for the following request: "${goal}". The project should be self-contained and runnable where possible. For web UIs, prioritize a single 'index.html' file with embedded CSS and JS. For backend apps (e.g., Python, Node.js), include a main runnable file (like app.py or index.js), a README.md explaining how to run it, and any necessary config files (like requirements.txt or package.json).`;
       const blueprintResult = await generateJson(blueprintPrompt, blueprintSchema);
       const blueprintData: Blueprint = JSON.parse(blueprintResult.text);
       setWorkshopState(prev => ({
@@ -224,14 +230,16 @@ When asked to provide code, use markdown code blocks. The user can apply your co
       try {
         const approvedBlueprint: Blueprint = JSON.parse(blueprintText);
         const files: ProjectFile[] = approvedBlueprint.files.map(f => ({ ...f, content: '' }));
+        const firstFile = files[0]?.fileName || null;
         setWorkshopState(prev => ({
             ...prev,
             stage: 'build',
             blueprint: approvedBlueprint,
             projectFiles: files,
-            selectedFileName: files[0]?.fileName || null
+            selectedFileName: firstFile
         }));
         logToConsole(`Blueprint approved. Project "${approvedBlueprint.projectName}" scaffolded.`);
+        if (firstFile) handleSelectFile(firstFile, files);
       } catch (e: any) {
           logToConsole(`Invalid blueprint JSON: ${e.message}`, 'error');
           setError(`Blueprint is not valid JSON. Please fix it before proceeding.`);
@@ -264,6 +272,39 @@ When asked to provide code, use markdown code blocks. The user can apply your co
         setLoadingMessage('');
     }
   };
+
+  const handleRunCode = async () => {
+    if (!selectedFile) return;
+    const { fileName, content } = selectedFile;
+    const extension = fileName.split('.').pop();
+
+    if (extension === 'html') {
+        setWorkshopState(p => ({ ...p, activeOutputTab: 'preview' }));
+        setPreviewKey(Date.now());
+        logToConsole(`Refreshing preview for ${fileName}.`, 'info');
+    } else if (extension && ['py', 'js', 'ts', 'go', 'sh', 'bash'].includes(extension)) {
+        setWorkshopState(p => ({ ...p, activeOutputTab: 'terminal', terminalOutput: '' }));
+        setIsLoading(true);
+        setLoadingMessage(`Running ${fileName}...`);
+        logToConsole(`Simulating execution for ${fileName}...`, 'info');
+        try {
+            const languageMap: { [key: string]: string } = { 'js': 'javascript', 'py': 'python', 'ts': 'typescript', 'go': 'go', 'sh': 'bash' };
+            const language = languageMap[extension] || extension;
+            const result = await simulateExecution(content, language);
+            setWorkshopState(p => ({ ...p, terminalOutput: result.text }));
+            logToConsole(`Execution of ${fileName} simulated.`, 'info');
+        } catch (err: any) {
+            const errorMsg = `Failed to simulate execution: ${err.message}`;
+            setWorkshopState(p => ({ ...p, terminalOutput: errorMsg }));
+            logToConsole(errorMsg, 'error');
+        } finally {
+            setIsLoading(false);
+            setLoadingMessage('');
+        }
+    } else {
+        logToConsole(`Cannot run file type: .${extension}. Only web previews and script execution are supported.`, 'warn');
+    }
+};
   
   const handleApplyCodeChange = (codeToApply: string) => {
     if (!selectedFileName) return;
@@ -320,6 +361,17 @@ When asked to provide code, use markdown code blocks. The user can apply your co
       setChatMessages([]);
   }
 
+  const handleSelectFile = (fileName: string, currentFiles = projectFiles) => {
+    const extension = fileName.split('.').pop();
+    const hasPreview = currentFiles.some(f => f.fileName.toLowerCase() === 'index.html');
+    const newActiveTab = (extension === 'html' && hasPreview) ? 'preview' : 'terminal';
+    setWorkshopState(prev => ({
+        ...prev,
+        selectedFileName: fileName,
+        activeOutputTab: newActiveTab
+    }));
+};
+
   if (stage === 'ideation') {
     return (<div className="animate-fade-in max-w-3xl mx-auto text-center"><PageHeader icon={<WrenchScrewdriverIcon className="w-8 h-8" />} title="Digital Workshop" description="The ultimate AI-powered IDE. Describe a project, and watch as it generates the blueprint, code, and even a live preview in seconds." /><Card className="p-6"><Textarea id="goal" label="Describe your project goal" value={goal} onChange={(e) => setWorkshopState(prev => ({...prev, goal: e.target.value}))} rows={8} placeholder="e.g., A Python Flask API with a /weather endpoint..." /><Button onClick={handleGenerateBlueprint} disabled={!goal || isLoading} isLoading={isLoading} className="mt-4 w-full" size="lg">{loadingMessage || 'Generate Blueprint'}</Button>{error && <p className="text-red-400 mt-4 text-sm">{error}</p>}</Card></div>);
   }
@@ -346,10 +398,28 @@ When asked to provide code, use markdown code blocks. The user can apply your co
     );
   }
 
-  const PreviewPanel = ({isFullScreen = false} : {isFullScreen?: boolean}) => (
+  const OutputPanel = ({isFullScreen = false} : {isFullScreen?: boolean}) => (
     <Card className="flex-1 flex flex-col" padding="none">
         <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
-            <h3 className="font-semibold text-sm pl-2 text-on-surface-variant flex items-center gap-2"><EyeIcon className="w-4 h-4"/>Live Preview</h3>
+             <div className="flex items-center gap-2">
+                    <TabButton 
+                        tabId="preview" 
+                        icon={<EyeIcon className="w-4 h-4"/>} 
+                        activeTab={activeOutputTab} 
+                        setTab={(t) => setWorkshopState(p=>({...p, activeOutputTab: t}))}
+                        disabled={!previewFile}
+                    >
+                        Preview
+                    </TabButton>
+                    <TabButton 
+                        tabId="terminal" 
+                        icon={<TerminalIcon className="w-4 h-4"/>} 
+                        activeTab={activeOutputTab} 
+                        setTab={(t) => setWorkshopState(p=>({...p, activeOutputTab: t}))}
+                    >
+                        Terminal
+                    </TabButton>
+             </div>
              {isFullScreen && (
                 <div className="flex items-center gap-2">
                     <Button size="sm" variant="secondary" onClick={() => setPreviewKey(Date.now())} title="Refresh Preview"><ArrowPathIcon className="w-4 h-4"/></Button>
@@ -359,12 +429,18 @@ When asked to provide code, use markdown code blocks. The user can apply your co
                 </div>
             )}
         </div>
-        <div className="flex-grow bg-white">
-            {previewFile ? (
-                 <iframe key={previewKey} srcDoc={previewFile.content} className="w-full h-full border-0" sandbox="allow-scripts allow-modals allow-popups allow-forms" title="Live Preview"/>
+        <div className="flex-grow bg-white relative">
+            {activeOutputTab === 'preview' ? (
+                previewFile ? (
+                    <iframe key={previewKey} srcDoc={previewFile.content} className="w-full h-full border-0" sandbox="allow-scripts allow-modals allow-popups allow-forms" title="Live Preview"/>
+                ) : (
+                    <div className="w-full h-full flex items-center justify-center text-center p-4">
+                        <p className="text-gray-500">Create an `index.html` file to see a live preview.</p>
+                    </div>
+                )
             ) : (
-                <div className="w-full h-full flex items-center justify-center text-center p-4">
-                    <p className="text-gray-500">Create an `index.html` file to see a live preview. <br/><small>Preview is only available for web technologies (HTML/CSS/JS).</small></p>
+                <div className="w-full h-full bg-background text-on-surface-variant p-2 font-mono text-xs whitespace-pre-wrap overflow-y-auto">
+                   {terminalOutput ? <pre>{terminalOutput}</pre> : <div className="text-on-surface-variant/50">Terminal output from running code will appear here.</div>}
                 </div>
             )}
         </div>
@@ -382,21 +458,21 @@ When asked to provide code, use markdown code blocks. The user can apply your co
         <div className="flex-grow flex gap-4 overflow-hidden">
             <Card className="w-64 flex-shrink-0 flex flex-col" padding="none">
                 <h3 className="font-semibold text-sm px-4 py-2 text-on-surface-variant border-b border-border-color">Files</h3>
-                <div className="p-2 overflow-y-auto flex-grow">{projectFiles.map(file => (<button key={file.fileName} onClick={() => setWorkshopState(prev => ({...prev, selectedFileName: file.fileName }))} className={`w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm transition-colors ${selectedFileName === file.fileName ? 'bg-primary-light text-primary' : 'hover:bg-surface'}`}><DocumentTextIcon className="w-4 h-4 flex-shrink-0" /><span className="truncate">{file.fileName}</span></button>))}</div>
+                <div className="p-2 overflow-y-auto flex-grow">{projectFiles.map(file => (<button key={file.fileName} onClick={() => handleSelectFile(file.fileName)} className={`w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm transition-colors ${selectedFileName === file.fileName ? 'bg-primary-light text-primary' : 'hover:bg-surface'}`}><DocumentTextIcon className="w-4 h-4 flex-shrink-0" /><span className="truncate">{file.fileName}</span></button>))}</div>
             </Card>
             
             <div className="flex-1 flex flex-col gap-4 overflow-hidden">
-                <Card className={`flex flex-col ${showPreview ? 'flex-[2]' : 'flex-1'}`} padding="none">
+                <Card className={`flex flex-col ${showOutputPanel ? 'flex-[2]' : 'flex-1'}`} padding="none">
                     <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
                         <span className="font-mono text-sm pl-2 flex items-center gap-2"><CodeIcon className="w-4 h-4"/>{selectedFileName || 'No file selected'}</span>
                         <div className="flex items-center gap-2">
-                            <Button size="sm" variant="secondary" onClick={() => setPreviewKey(Date.now())} title="Refresh Preview">
-                                <ArrowPathIcon className="w-4 h-4"/>
+                             <Button size="sm" variant="secondary" onClick={handleRunCode} isLoading={isLoading && loadingMessage.startsWith('Running')} title="Run Code">
+                                <PlayIcon className="w-4 h-4"/>
                             </Button>
-                            <Button size="sm" variant="secondary" onClick={() => setWorkshopState(p => ({...p, showPreview: !p.showPreview}))} title={showPreview ? "Hide Preview" : "Show Preview"}>
+                            <Button size="sm" variant="secondary" onClick={() => setWorkshopState(p => ({...p, showOutputPanel: !p.showOutputPanel}))} title={showOutputPanel ? "Hide Output" : "Show Output"}>
                                 <EyeIcon className="w-4 h-4"/>
                             </Button>
-                            <Button size="sm" variant="secondary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: true, showPreview: true}))} title="Fullscreen Preview">
+                            <Button size="sm" variant="secondary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: true, showOutputPanel: true}))} title="Fullscreen Preview" disabled={!previewFile}>
                                 <ArrowsPointingOutIcon className="w-4 h-4"/>
                             </Button>
                         </div>
@@ -415,21 +491,21 @@ When asked to provide code, use markdown code blocks. The user can apply your co
                          {isLoading && <div className="absolute inset-0 flex items-center justify-center bg-background/50"><Spinner/></div>}
                     </div>
                 </Card>
-                {showPreview && (
-                    <div className="flex-1 flex flex-col"><PreviewPanel /></div>
+                {showOutputPanel && (
+                    <div className="flex-1 flex flex-col"><OutputPanel /></div>
                 )}
             </div>
 
             <Card className="w-[450px] flex-shrink-0 flex flex-col" padding="none">
                  <div className="flex-shrink-0 p-2 border-b border-border-color flex items-center gap-2">
                     <TabButton tabId="chat" icon={<ChatBubbleBottomCenterTextIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>AI Chat</TabButton>
-                    <TabButton tabId="console" icon={<TerminalIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>Console {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}</TabButton>
+                    <TabButton tabId="console" icon={<TerminalIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>Logs {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}</TabButton>
                 </div>
 
                 {activeSideTab === 'console' && (
                     <div className="flex flex-col h-full overflow-hidden">
                         <div className="flex-grow p-2 space-y-1 font-mono text-xs overflow-y-auto text-on-surface-variant flex flex-col-reverse">{consoleMessages.map(msg => (<div key={msg.id} className={`p-1.5 rounded flex justify-between items-start gap-2 text-wrap break-words ${msg.type === 'error' ? 'bg-red-500/10 text-red-300' : msg.type === 'warn' ? 'bg-yellow-500/10 text-yellow-300' : ''}`}><span className="opacity-60 flex-shrink-0">{new Date(msg.id).toLocaleTimeString()}</span><span className="flex-grow text-right">{msg.message}</span></div>))}</div>
-                         <div className="p-2 border-t border-border-color"><Button size="sm" variant="secondary" onClick={() => setWorkshopState(prev => ({...prev, consoleMessages: []}))}>Clear Console</Button></div>
+                         <div className="p-2 border-t border-border-color"><Button size="sm" variant="secondary" onClick={() => setWorkshopState(prev => ({...prev, consoleMessages: []}))}>Clear Logs</Button></div>
                     </div>
                 )}
 
@@ -480,7 +556,7 @@ When asked to provide code, use markdown code blocks. The user can apply your co
             </Card>
         </div>
     </div>
-    {isPreviewFullscreen && <div className="fixed inset-0 z-50 flex flex-col bg-background p-4"><PreviewPanel isFullScreen={true} /></div>}
+    {isPreviewFullscreen && <div className="fixed inset-0 z-50 flex flex-col bg-background p-4"><OutputPanel isFullScreen={true} /></div>}
     </>
   );
 };
