@@ -1,7 +1,7 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Type } from '@google/genai';
-import { generateJson, generateText } from '../services/geminiService';
+import { Type, Chat } from '@google/genai';
+import { generateJson, generateText, createChat, sendMessageStream } from '../services/geminiService';
 import usePersistentState from '../hooks/usePersistentState';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -18,6 +18,8 @@ import { ChatBubbleBottomCenterTextIcon } from '../components/icons/ChatBubbleBo
 import { SparklesIcon } from '../components/icons/SparklesIcon';
 import { ArrowPathIcon } from '../components/icons/ArrowPathIcon';
 import { CogIcon } from '../components/icons/CogIcon';
+import { Input } from '../components/ui/Input';
+import { type ChatMessage } from '../types';
 
 const blueprintSchema = {
   type: Type.OBJECT,
@@ -88,7 +90,43 @@ const initialWorkshopState: WorkshopState = {
     projectFiles: [],
     selectedFileName: null,
     consoleMessages: [],
-    activeSideTab: 'console',
+    activeSideTab: 'chat',
+};
+
+const ChatMessageDisplay: React.FC<{ text: string }> = ({ text }) => {
+    if (!text) return <span className="animate-pulse">...</span>;
+
+    const codeBlockRegex = /```(\w*)\n([\s\S]+?)```/g;
+    const matches = Array.from(text.matchAll(codeBlockRegex));
+    
+    if (matches.length === 0) {
+        return <p className="whitespace-pre-wrap text-sm">{text}</p>;
+    }
+
+    const elements = [];
+    let lastIndex = 0;
+
+    matches.forEach((match, i) => {
+        const [fullMatch, language, code] = match;
+        const matchIndex = match.index || 0;
+
+        // Add text before the code block
+        if (matchIndex > lastIndex) {
+            elements.push(<p key={`text-${i}`} className="whitespace-pre-wrap">{text.substring(lastIndex, matchIndex)}</p>);
+        }
+
+        // Add the code block
+        elements.push(<CodeBlock key={`code-${i}`} code={code.trim()} language={language || 'text'} />);
+
+        lastIndex = matchIndex + fullMatch.length;
+    });
+
+    // Add any remaining text after the last code block
+    if (lastIndex < text.length) {
+        elements.push(<p key="text-last" className="whitespace-pre-wrap">{text.substring(lastIndex)}</p>);
+    }
+
+    return <div className="text-sm space-y-2">{elements}</div>;
 };
 
 
@@ -99,6 +137,13 @@ const DigitalWorkshop: React.FC = () => {
   const [loadingMessage, setLoadingMessage] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
 
+  // Chat state
+  const [chat, setChat] = useState<Chat | null>(null);
+  const chatMessagesKey = `digitalWorkshop_chatMessages_${workshopState.blueprint?.projectName || 'default'}`;
+  const [chatMessages, setChatMessages] = usePersistentState<ChatMessage[]>(chatMessagesKey, []);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatLoading, setIsChatLoading] = useState(false);
+
   const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, activeSideTab } = workshopState;
   
   const selectedFile = projectFiles.find(f => f.fileName === selectedFileName) || null;
@@ -106,6 +151,17 @@ const DigitalWorkshop: React.FC = () => {
   const logToConsole = useCallback((message: string, type: ConsoleMessage['type'] = 'info') => {
     setWorkshopState(prev => ({...prev, consoleMessages: [{ id: Date.now(), type, message }, ...prev.consoleMessages]}));
   }, [setWorkshopState]);
+  
+  useEffect(() => {
+    if (stage === 'build' && !chat) {
+        const systemInstruction = `You are an AI pair programmer assisting a developer.
+        The project is "${blueprint?.projectName}".
+        Description: "${blueprint?.description}".
+        The project files are: ${projectFiles.map(f => f.fileName).join(', ')}.
+        The user will provide context on which file they are viewing. Be helpful and concise. When asked to provide code, use markdown code blocks.`;
+        setChat(createChat(systemInstruction));
+    }
+  }, [stage, blueprint, projectFiles, chat]);
 
   const handleGenerateBlueprint = async () => {
     if (!goal) return;
@@ -113,6 +169,7 @@ const DigitalWorkshop: React.FC = () => {
     setLoadingMessage('Generating project blueprint...');
     setError(null);
     setWorkshopState(prev => ({ ...initialWorkshopState, goal: prev.goal }));
+    setChatMessages([]);
     logToConsole('Starting project generation...');
     try {
       const blueprintPrompt = `Generate a project blueprint for the following request: "${goal}". The project should be self-contained and runnable where possible. Prioritize a single, self-contained 'index.html' file for simple web UIs. For React, an index.tsx is acceptable.`;
@@ -180,6 +237,37 @@ const DigitalWorkshop: React.FC = () => {
     }
   };
   
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || !chat || isChatLoading) return;
+
+    const fullPrompt = `(My current file is ${selectedFileName || 'none'}. The user is asking the following question about it.)\n\n${chatInput}`;
+    
+    const newUserMessage: ChatMessage = { role: 'user', text: chatInput };
+    setChatMessages(prev => [...prev, newUserMessage]);
+    setChatInput('');
+    setIsChatLoading(true);
+    
+    try {
+        const stream = await sendMessageStream(chat, fullPrompt);
+        let modelResponse = '';
+        setChatMessages(prev => [...prev, { role: 'model', text: '' }]);
+        for await (const chunk of stream) {
+            modelResponse += chunk.text;
+            setChatMessages(prev => {
+                const newMessages = [...prev];
+                newMessages[newMessages.length - 1] = { role: 'model', text: modelResponse };
+                return newMessages;
+            });
+        }
+    } catch(e) {
+        console.error(e);
+        const errorMsg = {role: 'model' as const, text: 'Sorry, an error occurred.'};
+        setChatMessages(p => [...p, errorMsg]);
+    } finally {
+        setIsChatLoading(false);
+    }
+  }
+  
   const TabButton: React.FC<{tabId: any, activeTab: any, setTab: (tab: any) => void, icon: React.ReactNode, children: React.ReactNode, disabled?: boolean}> = ({ tabId, icon, children, activeTab, setTab, disabled }) => (
     <button onClick={() => setTab(tabId)} disabled={disabled} className={`flex items-center gap-2 px-3 py-1.5 text-xs rounded-md transition-colors ${activeTab === tabId ? 'bg-primary text-white' : 'bg-surface hover:bg-border-color'} disabled:opacity-50 disabled:cursor-not-allowed`}>
         {icon}
@@ -187,7 +275,10 @@ const DigitalWorkshop: React.FC = () => {
     </button>
   );
 
-  const resetState = () => setWorkshopState(initialWorkshopState);
+  const resetState = () => {
+      setWorkshopState(initialWorkshopState);
+      setChatMessages([]);
+  }
 
   // Ideation Stage
   if (stage === 'ideation') {
@@ -199,10 +290,14 @@ const DigitalWorkshop: React.FC = () => {
     return (
         <div className="animate-fade-in max-w-4xl mx-auto">
             <PageHeader icon={<DocumentTextIcon className="w-8 h-8"/>} title="Review Project Blueprint" description="The AI has generated a blueprint for your project. Review and edit the JSON below, then approve to start building."/>
-            <Card className="p-0">
-                <div className="h-[50vh]">
-                    <CodeBlock code={blueprintText} language="json"/>
-                </div>
+            <Card className="p-0 flex flex-col" style={{height: '60vh'}}>
+                <Textarea
+                    id="blueprint-editor"
+                    label="Blueprint Editor (JSON)"
+                    value={blueprintText}
+                    onChange={(e) => setWorkshopState(p => ({...p, blueprintText: e.target.value }))}
+                    className="!bg-background font-mono text-xs"
+                />
             </Card>
             <div className="mt-4 flex justify-between items-center">
                 <Button onClick={resetState} variant="secondary">Start Over</Button>
@@ -246,8 +341,8 @@ const DigitalWorkshop: React.FC = () => {
 
             <Card className="w-[450px] flex-shrink-0 flex flex-col" padding="none">
                  <div className="flex-shrink-0 p-2 border-b border-border-color flex items-center gap-2">
-                    <TabButton tabId="console" icon={<TerminalIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>Console {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}</TabButton>
                     <TabButton tabId="chat" icon={<ChatBubbleBottomCenterTextIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>AI Chat</TabButton>
+                    <TabButton tabId="console" icon={<TerminalIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>Console {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}</TabButton>
                     <TabButton tabId="settings" icon={<CogIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>Settings</TabButton>
                 </div>
 
@@ -259,10 +354,36 @@ const DigitalWorkshop: React.FC = () => {
                 )}
 
                 {activeSideTab === 'chat' && (
-                     <div className="flex flex-col h-full overflow-hidden justify-center items-center text-center p-4">
-                        <SparklesIcon className="w-12 h-12 text-on-surface-variant/50 mb-2"/>
-                        <h4 className="font-semibold text-on-surface">AI Iteration Coming Soon</h4>
-                        <p className="text-sm text-on-surface-variant">The ability to modify your project via chat is under construction.</p>
+                    <div className="flex flex-col h-full overflow-hidden">
+                        <div className="flex-grow p-4 space-y-4 overflow-y-auto">
+                            {chatMessages.map((msg, index) => (
+                            <div key={index} className={`flex items-start gap-3 w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                {msg.role === 'model' && (
+                                <div className="w-8 h-8 rounded-full bg-primary-light text-primary flex-shrink-0 flex items-center justify-center">
+                                    <SparklesIcon className="w-5 h-5" />
+                                </div>
+                                )}
+                                <div className={`px-4 py-3 rounded-lg max-w-xl shadow-sm ${msg.role === 'user' ? 'bg-primary text-background' : 'bg-surface text-on-surface'}`}>
+                                    <ChatMessageDisplay text={msg.text} />
+                                </div>
+                            </div>
+                            ))}
+                        </div>
+                        <div className="p-4 border-t border-border-color bg-surface">
+                            <div className="flex gap-2">
+                                <Input
+                                    value={chatInput}
+                                    onChange={(e) => setChatInput(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Enter' && !isChatLoading && handleSendMessage()}
+                                    placeholder="Ask about your project..."
+                                    className="flex-1"
+                                    disabled={isChatLoading}
+                                />
+                                <Button onClick={handleSendMessage} isLoading={isChatLoading} disabled={!chatInput.trim()}>
+                                    Send
+                                </Button>
+                            </div>
+                        </div>
                     </div>
                 )}
                 
