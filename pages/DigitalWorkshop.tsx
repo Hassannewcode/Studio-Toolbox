@@ -20,6 +20,10 @@ import { ArrowPathIcon } from '../components/icons/ArrowPathIcon';
 import { CogIcon } from '../components/icons/CogIcon';
 import { Input } from '../components/ui/Input';
 import { type ChatMessage } from '../types';
+import { ArrowsPointingOutIcon } from '../components/icons/ArrowsPointingOutIcon';
+import { ArrowsPointingInIcon } from '../components/icons/ArrowsPointingInIcon';
+import { PaintBrushIcon } from '../components/icons/PaintBrushIcon';
+
 
 const blueprintSchema = {
   type: Type.OBJECT,
@@ -80,6 +84,7 @@ interface WorkshopState {
     selectedFileName: string | null;
     consoleMessages: ConsoleMessage[];
     activeSideTab: ActiveSideTab;
+    isPreviewFullscreen: boolean;
 }
 
 const initialWorkshopState: WorkshopState = {
@@ -91,9 +96,14 @@ const initialWorkshopState: WorkshopState = {
     selectedFileName: null,
     consoleMessages: [],
     activeSideTab: 'chat',
+    isPreviewFullscreen: false,
 };
 
-const ChatMessageDisplay: React.FC<{ text: string }> = ({ text }) => {
+const ChatMessageDisplay: React.FC<{ 
+    text: string;
+    onApplyCode: (code: string) => void;
+    canApplyCode: boolean;
+}> = ({ text, onApplyCode, canApplyCode }) => {
     if (!text) return <span className="animate-pulse">...</span>;
 
     const codeBlockRegex = /```(\w*)\n([\s\S]+?)```/g;
@@ -103,25 +113,38 @@ const ChatMessageDisplay: React.FC<{ text: string }> = ({ text }) => {
         return <p className="whitespace-pre-wrap text-sm">{text}</p>;
     }
 
-    const elements = [];
+    const elements: React.ReactNode[] = [];
     let lastIndex = 0;
 
     matches.forEach((match, i) => {
         const [fullMatch, language, code] = match;
         const matchIndex = match.index || 0;
 
-        // Add text before the code block
         if (matchIndex > lastIndex) {
             elements.push(<p key={`text-${i}`} className="whitespace-pre-wrap">{text.substring(lastIndex, matchIndex)}</p>);
         }
 
-        // Add the code block
-        elements.push(<CodeBlock key={`code-${i}`} code={code.trim()} language={language || 'text'} />);
+        elements.push(
+            <div key={`code-wrapper-${i}`} className="relative group/code">
+                <CodeBlock code={code.trim()} language={language || 'text'} />
+                {canApplyCode && (
+                    <Button 
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => onApplyCode(code.trim())}
+                        className="absolute top-2 right-14 !px-2 !py-1 text-xs opacity-0 group-hover/code:opacity-100 transition-opacity"
+                        title="Apply this code to the current file"
+                    >
+                        <PaintBrushIcon className="w-4 h-4 mr-1" />
+                        Apply
+                    </Button>
+                )}
+            </div>
+        );
 
         lastIndex = matchIndex + fullMatch.length;
     });
 
-    // Add any remaining text after the last code block
     if (lastIndex < text.length) {
         elements.push(<p key="text-last" className="whitespace-pre-wrap">{text.substring(lastIndex)}</p>);
     }
@@ -131,22 +154,24 @@ const ChatMessageDisplay: React.FC<{ text: string }> = ({ text }) => {
 
 
 const DigitalWorkshop: React.FC = () => {
-  const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v4', initialWorkshopState);
+  const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v5', initialWorkshopState);
   
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
 
-  // Chat state
   const [chat, setChat] = useState<Chat | null>(null);
-  const chatMessagesKey = `digitalWorkshop_chatMessages_${workshopState.blueprint?.projectName || 'default'}`;
+  const chatMessagesKey = `digitalWorkshop_chatMessages_${workshopState.blueprint?.projectName || 'default'}_v2`;
   const [chatMessages, setChatMessages] = usePersistentState<ChatMessage[]>(chatMessagesKey, []);
   const [chatInput, setChatInput] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
+  const [previewKey, setPreviewKey] = useState(Date.now());
 
-  const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, activeSideTab } = workshopState;
+
+  const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, activeSideTab, isPreviewFullscreen } = workshopState;
   
   const selectedFile = projectFiles.find(f => f.fileName === selectedFileName) || null;
+  const previewFile = projectFiles.find(f => f.fileName.toLowerCase() === 'index.html');
 
   const logToConsole = useCallback((message: string, type: ConsoleMessage['type'] = 'info') => {
     setWorkshopState(prev => ({...prev, consoleMessages: [{ id: Date.now(), type, message }, ...prev.consoleMessages]}));
@@ -155,10 +180,10 @@ const DigitalWorkshop: React.FC = () => {
   useEffect(() => {
     if (stage === 'build' && !chat) {
         const systemInstruction = `You are an AI pair programmer assisting a developer.
-        The project is "${blueprint?.projectName}".
-        Description: "${blueprint?.description}".
-        The project files are: ${projectFiles.map(f => f.fileName).join(', ')}.
-        The user will provide context on which file they are viewing. Be helpful and concise. When asked to provide code, use markdown code blocks.`;
+The project is "${blueprint?.projectName}". Description: "${blueprint?.description}".
+The project files are: ${projectFiles.map(f => f.fileName).join(', ')}.
+The user will provide context on which file they are viewing. Be helpful and concise.
+When asked to provide code, use markdown code blocks. The user can apply your code suggestions to the current file with a single click.`;
         setChat(createChat(systemInstruction));
     }
   }, [stage, blueprint, projectFiles, chat]);
@@ -237,10 +262,22 @@ const DigitalWorkshop: React.FC = () => {
     }
   };
   
+  const handleApplyCodeChange = (codeToApply: string) => {
+    if (!selectedFileName) return;
+    setWorkshopState(prev => ({
+        ...prev,
+        projectFiles: prev.projectFiles.map(f =>
+            f.fileName === selectedFileName ? { ...f, content: codeToApply } : f
+        )
+    }));
+    logToConsole(`Applied AI suggestion to ${selectedFileName}.`, 'info');
+  };
+  
   const handleSendMessage = async () => {
     if (!chatInput.trim() || !chat || isChatLoading) return;
-
-    const fullPrompt = `(My current file is ${selectedFileName || 'none'}. The user is asking the following question about it.)\n\n${chatInput}`;
+    
+    const context = `The user is currently viewing the file: ${selectedFileName || 'none'}.`;
+    const fullPrompt = `${context}\n\nUser question: ${chatInput}`;
     
     const newUserMessage: ChatMessage = { role: 'user', text: chatInput };
     setChatMessages(prev => [...prev, newUserMessage]);
@@ -280,26 +317,24 @@ const DigitalWorkshop: React.FC = () => {
       setChatMessages([]);
   }
 
-  // Ideation Stage
   if (stage === 'ideation') {
     return (<div className="animate-fade-in max-w-3xl mx-auto text-center"><PageHeader icon={<WrenchScrewdriverIcon className="w-8 h-8" />} title="Digital Workshop" description="The ultimate AI-powered IDE. Describe a project, and watch as it generates the blueprint, code, and even a live preview in seconds." /><Card className="p-6"><Textarea id="goal" label="Describe your project goal" value={goal} onChange={(e) => setWorkshopState(prev => ({...prev, goal: e.target.value}))} rows={8} placeholder="e.g., A Python Flask API with a /weather endpoint..." /><Button onClick={handleGenerateBlueprint} disabled={!goal || isLoading} isLoading={isLoading} className="mt-4 w-full" size="lg">{loadingMessage || 'Generate Blueprint'}</Button>{error && <p className="text-red-400 mt-4 text-sm">{error}</p>}</Card></div>);
   }
 
-  // Blueprint Review Stage
   if (stage === 'blueprint_review') {
     return (
-        <div className="animate-fade-in max-w-4xl mx-auto">
-            <PageHeader icon={<DocumentTextIcon className="w-8 h-8"/>} title="Review Project Blueprint" description="The AI has generated a blueprint for your project. Review and edit the JSON below, then approve to start building."/>
-            <Card className="p-0 flex flex-col" style={{height: '60vh'}}>
+        <div className="animate-fade-in max-w-4xl mx-auto flex flex-col" style={{height: 'calc(100vh - 10rem)'}}>
+            <div className="flex-shrink-0"><PageHeader icon={<DocumentTextIcon className="w-8 h-8"/>} title="Review Project Blueprint" description="The AI has generated a blueprint for your project. Review and edit the JSON below, then approve to start building."/></div>
+            <Card className="p-0 flex flex-col flex-grow overflow-hidden">
                 <Textarea
                     id="blueprint-editor"
                     label="Blueprint Editor (JSON)"
                     value={blueprintText}
                     onChange={(e) => setWorkshopState(p => ({...p, blueprintText: e.target.value }))}
-                    className="!bg-background font-mono text-xs"
+                    className="!bg-background font-mono text-xs flex-grow"
                 />
             </Card>
-            <div className="mt-4 flex justify-between items-center">
+            <div className="mt-4 flex justify-between items-center flex-shrink-0">
                 <Button onClick={resetState} variant="secondary">Start Over</Button>
                 {error && <p className="text-red-400 text-sm">{error}</p>}
                 <Button onClick={handleApproveBlueprint} size="lg">Approve & Build Project</Button>
@@ -308,9 +343,32 @@ const DigitalWorkshop: React.FC = () => {
     );
   }
 
-  // Build Stage
+  const PreviewPanel = ({isFullScreen = false} : {isFullScreen?: boolean}) => (
+    <Card className="flex-1 flex flex-col" padding="none">
+        <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
+            <h3 className="font-semibold text-sm pl-2 text-on-surface-variant flex items-center gap-2"><EyeIcon className="w-4 h-4"/>Live Preview</h3>
+            <div className="flex items-center gap-2">
+                <Button size="sm" variant="secondary" onClick={() => setPreviewKey(Date.now())}><ArrowPathIcon className="w-4 h-4 mr-1"/>Refresh</Button>
+                <Button size="sm" variant="secondary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: !p.isPreviewFullscreen}))}>
+                    {isFullScreen ? <><ArrowsPointingInIcon className="w-4 h-4 mr-1"/>Exit</> : <><ArrowsPointingOutIcon className="w-4 h-4 mr-1"/>Fullscreen</>}
+                </Button>
+            </div>
+        </div>
+        <div className="flex-grow bg-white">
+            {previewFile ? (
+                 <iframe key={previewKey} srcDoc={previewFile.content} className="w-full h-full border-0" sandbox="allow-scripts allow-modals allow-popups allow-forms" title="Live Preview"/>
+            ) : (
+                <div className="w-full h-full flex items-center justify-center text-center p-4">
+                    <p className="text-gray-500">Create an `index.html` file to see a live preview. <br/><small>Preview is only available for web technologies (HTML/CSS/JS).</small></p>
+                </div>
+            )}
+        </div>
+    </Card>
+  );
+
   return (
-    <div className="animate-fade-in h-full flex flex-col">
+    <>
+    <div className={`animate-fade-in h-full flex-col ${isPreviewFullscreen ? 'hidden' : 'flex'}`}>
         <div className="flex justify-between items-center mb-4 flex-shrink-0">
             <div><h2 className="text-2xl font-bold text-on-surface">{blueprint?.projectName}</h2><p className="text-on-surface-variant">{blueprint?.description}</p></div>
             <Button onClick={resetState} variant="secondary">Start Over</Button>
@@ -322,33 +380,37 @@ const DigitalWorkshop: React.FC = () => {
                 <div className="p-2 overflow-y-auto flex-grow">{projectFiles.map(file => (<button key={file.fileName} onClick={() => setWorkshopState(prev => ({...prev, selectedFileName: file.fileName }))} className={`w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm transition-colors ${selectedFileName === file.fileName ? 'bg-primary-light text-primary' : 'hover:bg-surface'}`}><DocumentTextIcon className="w-4 h-4 flex-shrink-0" /><span className="truncate">{file.fileName}</span></button>))}</div>
             </Card>
             
-            <Card className="flex-1 flex flex-col" padding="none">
-                <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
-                    <span className="font-mono text-sm pl-2">{selectedFileName}</span>
-                </div>
-                <div className="flex-grow overflow-auto bg-background relative">
-                    {selectedFile && !selectedFile.content && (
-                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-background/80 z-10">
-                            <p className="mb-4 text-on-surface-variant">This file is empty.</p>
-                            <Button onClick={() => generateFileContent(selectedFile.fileName)} isLoading={isLoading} disabled={isLoading}>
-                                {loadingMessage || `Generate Code for ${selectedFile.fileName}`}
-                            </Button>
-                        </div>
-                    )}
-                    {selectedFile && <CodeBlock code={selectedFile.content} language={selectedFile.fileName.split('.').pop() || 'text'} />}
-                </div>
-            </Card>
+            <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+                <Card className="flex-[2] flex flex-col" padding="none">
+                    <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
+                        <span className="font-mono text-sm pl-2 flex items-center gap-2"><CodeIcon className="w-4 h-4"/>{selectedFileName || 'No file selected'}</span>
+                    </div>
+                    <div className="flex-grow overflow-auto bg-background relative">
+                        {selectedFile ? (
+                            !selectedFile.content && !isLoading ? (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center bg-background/80 z-10">
+                                    <p className="mb-4 text-on-surface-variant">This file is empty.</p>
+                                    <Button onClick={() => generateFileContent(selectedFile.fileName)} isLoading={isLoading} disabled={isLoading}>
+                                        {loadingMessage || `Generate Code for ${selectedFile.fileName}`}
+                                    </Button>
+                                </div>
+                            ) : (<CodeBlock code={selectedFile.content} language={selectedFile.fileName.split('.').pop() || 'text'} />)
+                        ) : (<div className="w-full h-full flex items-center justify-center"><p className="text-on-surface-variant">Select a file to view its content.</p></div>)}
+                         {isLoading && <div className="absolute inset-0 flex items-center justify-center bg-background/50"><Spinner/></div>}
+                    </div>
+                </Card>
+                <div className="flex-1 flex flex-col"><PreviewPanel /></div>
+            </div>
 
             <Card className="w-[450px] flex-shrink-0 flex flex-col" padding="none">
                  <div className="flex-shrink-0 p-2 border-b border-border-color flex items-center gap-2">
                     <TabButton tabId="chat" icon={<ChatBubbleBottomCenterTextIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>AI Chat</TabButton>
                     <TabButton tabId="console" icon={<TerminalIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>Console {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}</TabButton>
-                    <TabButton tabId="settings" icon={<CogIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>Settings</TabButton>
                 </div>
 
                 {activeSideTab === 'console' && (
                     <div className="flex flex-col h-full overflow-hidden">
-                        <div className="flex-grow p-2 space-y-1 font-mono text-xs overflow-y-auto text-on-surface-variant flex flex-col-reverse">{consoleMessages.map(msg => (<div key={msg.id} className={`p-2 rounded flex justify-between items-start gap-2 ${msg.type === 'error' ? 'bg-red-500/10 text-red-300' : msg.type === 'warn' ? 'bg-yellow-500/10 text-yellow-300' : ''}`}><span><span className="mr-2 opacity-50">{new Date(msg.id).toLocaleTimeString()}</span>{msg.message}</span></div>))}</div>
+                        <div className="flex-grow p-2 space-y-1 font-mono text-xs overflow-y-auto text-on-surface-variant flex flex-col-reverse">{consoleMessages.map(msg => (<div key={msg.id} className={`p-1.5 rounded flex justify-between items-start gap-2 text-wrap break-words ${msg.type === 'error' ? 'bg-red-500/10 text-red-300' : msg.type === 'warn' ? 'bg-yellow-500/10 text-yellow-300' : ''}`}><span className="opacity-60 flex-shrink-0">{new Date(msg.id).toLocaleTimeString()}</span><span className="flex-grow text-right">{msg.message}</span></div>))}</div>
                          <div className="p-2 border-t border-border-color"><Button size="sm" variant="secondary" onClick={() => setWorkshopState(prev => ({...prev, consoleMessages: []}))}>Clear Console</Button></div>
                     </div>
                 )}
@@ -356,6 +418,7 @@ const DigitalWorkshop: React.FC = () => {
                 {activeSideTab === 'chat' && (
                     <div className="flex flex-col h-full overflow-hidden">
                         <div className="flex-grow p-4 space-y-4 overflow-y-auto">
+                            {chatMessages.length === 0 && <div className="text-center text-on-surface-variant text-sm p-4">Ask the AI for help with your project! You can ask it to write code, explain concepts, or suggest improvements.</div>}
                             {chatMessages.map((msg, index) => (
                             <div key={index} className={`flex items-start gap-3 w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                 {msg.role === 'model' && (
@@ -363,11 +426,21 @@ const DigitalWorkshop: React.FC = () => {
                                     <SparklesIcon className="w-5 h-5" />
                                 </div>
                                 )}
-                                <div className={`px-4 py-3 rounded-lg max-w-xl shadow-sm ${msg.role === 'user' ? 'bg-primary text-background' : 'bg-surface text-on-surface'}`}>
-                                    <ChatMessageDisplay text={msg.text} />
+                                <div className={`px-4 py-3 rounded-lg max-w-full shadow-sm ${msg.role === 'user' ? 'bg-primary text-background' : 'bg-surface text-on-surface'}`}>
+                                    <ChatMessageDisplay text={msg.text} onApplyCode={handleApplyCodeChange} canApplyCode={!!selectedFileName} />
                                 </div>
                             </div>
                             ))}
+                             {isChatLoading && chatMessages[chatMessages.length - 1]?.role !== 'model' && (
+                                <div className="flex items-start gap-3">
+                                    <div className="w-8 h-8 rounded-full bg-primary-light text-primary flex-shrink-0 flex items-center justify-center">
+                                        <SparklesIcon className="w-5 h-5" />
+                                    </div>
+                                    <div className="px-4 py-2 rounded-lg bg-surface">
+                                        <span className="animate-pulse text-sm">Thinking...</span>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                         <div className="p-4 border-t border-border-color bg-surface">
                             <div className="flex gap-2">
@@ -386,24 +459,11 @@ const DigitalWorkshop: React.FC = () => {
                         </div>
                     </div>
                 )}
-                
-                {activeSideTab === 'settings' && (
-                     <div className="p-4 space-y-4">
-                        <h4 className="font-semibold text-on-surface">Project Settings</h4>
-                        <p className="text-sm text-on-surface-variant">Configuration options for your project will appear here.</p>
-                        <Card className="p-4">
-                            <h5 className="font-semibold text-sm mb-2">Dummy Model Hyperparameters</h5>
-                            <div className="space-y-2 text-xs">
-                                <div className="flex justify-between"><span>Learning Rate:</span> <span>0.001</span></div>
-                                <div className="flex justify-between"><span>Batch Size:</span> <span>32</span></div>
-                                <div className="flex justify-between"><span>Epochs:</span> <span>5</span></div>
-                            </div>
-                        </Card>
-                    </div>
-                )}
             </Card>
         </div>
     </div>
+    {isPreviewFullscreen && <div className="fixed inset-0 z-50 flex flex-col bg-background p-4"><PreviewPanel isFullScreen={true} /></div>}
+    </>
   );
 };
 
