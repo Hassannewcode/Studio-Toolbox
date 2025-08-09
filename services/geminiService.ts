@@ -1,4 +1,5 @@
 
+
 import { GoogleGenAI, Type, GenerateContentResponse, Chat, Tool } from "@google/genai";
 
 if (!process.env.API_KEY) {
@@ -28,6 +29,25 @@ export const generateText = async (
         return response;
     } catch (error) {
         console.error("Error generating text:", error);
+        throw error;
+    }
+};
+
+export const simulateExecution = async (code: string, language: string): Promise<GenerateContentResponse> => {
+    const systemInstruction = `You are a code execution simulator. Given the following ${language} code, what would the complete terminal output be if it were run? Provide only the raw, simulated output. Do not add any explanation, commentary, or markdown formatting. If the code starts a server, show the typical server startup message and what would be logged.`;
+    const prompt = `Code:\n\`\`\`${language}\n${code}\n\`\`\``;
+    try {
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: prompt,
+            config: {
+                systemInstruction: systemInstruction,
+                temperature: 0,
+            }
+        });
+        return response;
+    } catch (error) {
+        console.error("Error simulating execution:", error);
         throw error;
     }
 };
