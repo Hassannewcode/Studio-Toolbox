@@ -1,4 +1,5 @@
 
+
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Type, Chat } from '@google/genai';
 import { generateJson, generateText, createChat, sendMessageStream } from '../services/geminiService';
@@ -85,6 +86,7 @@ interface WorkshopState {
     consoleMessages: ConsoleMessage[];
     activeSideTab: ActiveSideTab;
     isPreviewFullscreen: boolean;
+    showPreview: boolean;
 }
 
 const initialWorkshopState: WorkshopState = {
@@ -97,6 +99,7 @@ const initialWorkshopState: WorkshopState = {
     consoleMessages: [],
     activeSideTab: 'chat',
     isPreviewFullscreen: false,
+    showPreview: true,
 };
 
 const ChatMessageDisplay: React.FC<{ 
@@ -168,7 +171,7 @@ const DigitalWorkshop: React.FC = () => {
   const [previewKey, setPreviewKey] = useState(Date.now());
 
 
-  const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, activeSideTab, isPreviewFullscreen } = workshopState;
+  const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, activeSideTab, isPreviewFullscreen, showPreview } = workshopState;
   
   const selectedFile = projectFiles.find(f => f.fileName === selectedFileName) || null;
   const previewFile = projectFiles.find(f => f.fileName.toLowerCase() === 'index.html');
@@ -347,12 +350,14 @@ When asked to provide code, use markdown code blocks. The user can apply your co
     <Card className="flex-1 flex flex-col" padding="none">
         <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
             <h3 className="font-semibold text-sm pl-2 text-on-surface-variant flex items-center gap-2"><EyeIcon className="w-4 h-4"/>Live Preview</h3>
-            <div className="flex items-center gap-2">
-                <Button size="sm" variant="secondary" onClick={() => setPreviewKey(Date.now())}><ArrowPathIcon className="w-4 h-4 mr-1"/>Refresh</Button>
-                <Button size="sm" variant="secondary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: !p.isPreviewFullscreen}))}>
-                    {isFullScreen ? <><ArrowsPointingInIcon className="w-4 h-4 mr-1"/>Exit</> : <><ArrowsPointingOutIcon className="w-4 h-4 mr-1"/>Fullscreen</>}
-                </Button>
-            </div>
+             {isFullScreen && (
+                <div className="flex items-center gap-2">
+                    <Button size="sm" variant="secondary" onClick={() => setPreviewKey(Date.now())} title="Refresh Preview"><ArrowPathIcon className="w-4 h-4"/></Button>
+                    <Button size="sm" variant="secondary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: false}))}>
+                        <ArrowsPointingInIcon className="w-4 h-4 mr-1"/>Exit
+                    </Button>
+                </div>
+            )}
         </div>
         <div className="flex-grow bg-white">
             {previewFile ? (
@@ -381,9 +386,20 @@ When asked to provide code, use markdown code blocks. The user can apply your co
             </Card>
             
             <div className="flex-1 flex flex-col gap-4 overflow-hidden">
-                <Card className="flex-[2] flex flex-col" padding="none">
+                <Card className={`flex flex-col ${showPreview ? 'flex-[2]' : 'flex-1'}`} padding="none">
                     <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
                         <span className="font-mono text-sm pl-2 flex items-center gap-2"><CodeIcon className="w-4 h-4"/>{selectedFileName || 'No file selected'}</span>
+                        <div className="flex items-center gap-2">
+                            <Button size="sm" variant="secondary" onClick={() => setPreviewKey(Date.now())} title="Refresh Preview">
+                                <ArrowPathIcon className="w-4 h-4"/>
+                            </Button>
+                            <Button size="sm" variant="secondary" onClick={() => setWorkshopState(p => ({...p, showPreview: !p.showPreview}))} title={showPreview ? "Hide Preview" : "Show Preview"}>
+                                <EyeIcon className="w-4 h-4"/>
+                            </Button>
+                            <Button size="sm" variant="secondary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: true, showPreview: true}))} title="Fullscreen Preview">
+                                <ArrowsPointingOutIcon className="w-4 h-4"/>
+                            </Button>
+                        </div>
                     </div>
                     <div className="flex-grow overflow-auto bg-background relative">
                         {selectedFile ? (
@@ -399,7 +415,9 @@ When asked to provide code, use markdown code blocks. The user can apply your co
                          {isLoading && <div className="absolute inset-0 flex items-center justify-center bg-background/50"><Spinner/></div>}
                     </div>
                 </Card>
-                <div className="flex-1 flex flex-col"><PreviewPanel /></div>
+                {showPreview && (
+                    <div className="flex-1 flex flex-col"><PreviewPanel /></div>
+                )}
             </div>
 
             <Card className="w-[450px] flex-shrink-0 flex flex-col" padding="none">
