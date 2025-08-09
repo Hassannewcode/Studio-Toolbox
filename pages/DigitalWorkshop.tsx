@@ -1,7 +1,3 @@
-
-
-
-
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Type, Chat } from '@google/genai';
 import { generateJson, generateText, createChat, sendMessageStream, simulateExecution } from '../services/geminiService';
@@ -142,7 +138,7 @@ const ChatMessageDisplay: React.FC<{
                         size="sm"
                         variant="secondary"
                         onClick={() => onApplyCode(code.trim())}
-                        className="absolute top-2 right-14 !px-2 !py-1 text-xs opacity-0 group-hover/code:opacity-100 transition-opacity !border-glow-green/50 !text-glow-green hover:!bg-glow-green/20"
+                        className="absolute top-2 right-14 !px-2 !py-1 text-xs opacity-0 group-hover/code:opacity-100 transition-opacity"
                         title="Apply this code to the current file"
                     >
                         <PaintBrushIcon className="w-4 h-4 mr-1" />
@@ -164,7 +160,7 @@ const ChatMessageDisplay: React.FC<{
 
 
 const DigitalWorkshop: React.FC = () => {
-  const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v6', initialWorkshopState);
+  const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v7', initialWorkshopState);
   
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
@@ -189,10 +185,10 @@ const DigitalWorkshop: React.FC = () => {
   
   useEffect(() => {
     if (stage === 'build' && !chat) {
-        const systemInstruction = `You are an AI pair programmer assisting a developer inside a retro-futuristic, terminal-like IDE.
+        const systemInstruction = `You are an AI pair programmer in a development environment.
 The project is "${blueprint?.projectName}". Description: "${blueprint?.description}".
 The project files are: ${projectFiles.map(f => f.fileName).join(', ')}.
-The user will provide context on which file they are viewing. Be helpful and concise. Adopt a slightly stylized, "hacker" persona.
+The user will provide context on which file they are viewing. Be helpful and concise.
 When asked to provide code, use markdown code blocks. The user can apply your code suggestions to the current file with a single click.`;
         setChat(createChat(systemInstruction));
     }
@@ -350,8 +346,8 @@ When asked to provide code, use markdown code blocks. The user can apply your co
     }
   }
   
-  const GlowTabButton: React.FC<{tabId: any, activeTab: any, setTab: (tab: any) => void, icon: React.ReactNode, children: React.ReactNode, disabled?: boolean}> = ({ tabId, icon, children, activeTab, setTab, disabled }) => (
-    <button onClick={() => setTab(tabId)} disabled={disabled} className={`flex items-center gap-2 px-3 py-1.5 text-xs rounded-md transition-colors ${activeTab === tabId ? 'bg-glow-green text-black font-bold' : 'bg-black/50 text-glow-green/70 hover:bg-glow-green/20 hover:text-glow-green'} disabled:opacity-50 disabled:cursor-not-allowed`}>
+  const TabButton: React.FC<{tabId: any, activeTab: any, setTab: (tab: any) => void, icon: React.ReactNode, children: React.ReactNode, disabled?: boolean}> = ({ tabId, icon, children, activeTab, setTab, disabled }) => (
+    <button onClick={() => setTab(tabId)} disabled={disabled} className={`flex items-center gap-2 px-3 py-1.5 text-xs rounded-md transition-colors ${activeTab === tabId ? 'bg-primary text-white font-medium' : 'bg-surface text-on-surface-variant hover:bg-border-color'} disabled:opacity-50 disabled:cursor-not-allowed`}>
         {icon}
         {children}
     </button>
@@ -364,7 +360,6 @@ When asked to provide code, use markdown code blocks. The user can apply your co
 
   const handleSelectFile = (fileName: string, currentFiles = projectFiles) => {
     const extension = fileName.split('.').pop()?.toLowerCase();
-    // Only switch to terminal for file types that are unambiguously backend and not for previewing
     const isBackendExecutable = extension && ['py', 'go', 'sh', 'rb', 'java'].includes(extension);
     
     setWorkshopState(prev => ({
@@ -376,70 +371,60 @@ When asked to provide code, use markdown code blocks. The user can apply your co
 
   if (stage === 'ideation') {
     return (
-        <div className="relative bg-black font-mono animate-fade-in h-full flex flex-col justify-center items-center p-4">
-            <div className="absolute inset-0 grid-bg opacity-20 z-0"></div>
-            <div className="absolute inset-0 scanline animate-scanline z-0"></div>
-            <div className="relative z-10 max-w-3xl mx-auto text-center w-full">
-                <div className="mb-8 flex items-center justify-center gap-4 text-glow">
-                    <div className="flex-shrink-0 flex items-center justify-center w-12 h-12 bg-glow-green/10 border border-glow-green/30 text-glow-green rounded-lg">
-                        <WrenchScrewdriverIcon className="w-8 h-8"/>
-                    </div>
-                    <div>
-                        <h1 className="text-3xl font-bold animate-text-flicker">Digital Workshop</h1>
-                        <p className="text-glow-green/70 mt-1 max-w-2xl">Describe a project. The AI will generate the blueprint, code, and a live preview.</p>
-                    </div>
+        <div className="max-w-3xl mx-auto animate-fade-in flex flex-col justify-center h-full">
+            <PageHeader
+                icon={<WrenchScrewdriverIcon className="w-8 h-8" />}
+                title="Digital Workshop"
+                description="Describe a project. The AI will generate the blueprint, code, and a live preview."
+            />
+            <Card className="p-6">
+                <Textarea 
+                  id="goal" 
+                  label="Project Goal" 
+                  value={goal} 
+                  onChange={(e) => setWorkshopState(prev => ({...prev, goal: e.target.value}))} 
+                  rows={8} 
+                  placeholder="e.g., A Python Flask API with a /weather endpoint..." 
+                />
+                <div className="mt-4 flex justify-end">
+                    <Button onClick={handleGenerateBlueprint} disabled={!goal || isLoading} isLoading={isLoading} size="lg">{loadingMessage || 'Generate Blueprint'}</Button>
                 </div>
-                <Card className="p-6 bg-black/70 backdrop-blur-sm border border-glow-green/40">
-                    <Textarea 
-                      id="goal" 
-                      label="PROJECT GOAL" 
-                      value={goal} 
-                      onChange={(e) => setWorkshopState(prev => ({...prev, goal: e.target.value}))} 
-                      rows={8} 
-                      placeholder="e.g., A Python Flask API with a /weather endpoint..." 
-                      className="!bg-black/50 !border-glow-green/50 !text-glow-green focus:!ring-glow-green"
-                    />
-                    <Button onClick={handleGenerateBlueprint} disabled={!goal || isLoading} isLoading={isLoading} className="mt-4 w-full !bg-glow-green hover:!bg-white !text-black !font-bold" size="lg">{loadingMessage || 'Generate Blueprint'}</Button>
-                    {error && <p className="text-red-400 mt-4 text-sm">{error}</p>}
-                </Card>
-            </div>
+                {error && <p className="text-red-500 mt-4 text-sm">{error}</p>}
+            </Card>
         </div>
     );
   }
 
   if (stage === 'blueprint_review') {
     return (
-        <div className="relative bg-black font-mono animate-fade-in h-full flex flex-col p-4">
-            <div className="absolute inset-0 grid-bg opacity-20 z-0"></div>
-            <div className="absolute inset-0 scanline animate-scanline z-0"></div>
-            <div className="relative z-10 max-w-4xl mx-auto flex flex-col h-full w-full">
-                <div className="flex-shrink-0 text-center mb-4">
-                    <h1 className="text-3xl font-bold text-glow animate-text-flicker">Review Project Blueprint</h1>
-                    <p className="text-glow-green/70 mt-1">The AI has generated a blueprint. Review and edit the JSON below, then approve to start building.</p>
-                </div>
-                <Card className="p-0 flex flex-col flex-grow overflow-hidden bg-black/70 backdrop-blur-sm border border-glow-green/40">
-                    <Textarea
-                        id="blueprint-editor"
-                        value={blueprintText}
-                        onChange={(e) => setWorkshopState(p => ({...p, blueprintText: e.target.value }))}
-                        className="!bg-black/80 font-mono text-xs flex-grow !border-0 !text-glow-green focus:!ring-glow-green"
-                    />
-                </Card>
-                <div className="mt-4 flex justify-between items-center flex-shrink-0">
-                    <Button onClick={resetState} variant="secondary" className="!border-glow-green/50 !text-glow-green hover:!bg-glow-green/20">Start Over</Button>
-                    {error && <p className="text-red-400 text-sm">{error}</p>}
-                    <Button onClick={handleApproveBlueprint} size="lg" className="!bg-glow-green hover:!bg-white !text-black !font-bold">Approve & Build Project</Button>
-                </div>
+        <div className="max-w-4xl mx-auto animate-fade-in flex flex-col h-full py-4">
+            <PageHeader
+                icon={<DocumentTextIcon className="w-8 h-8" />}
+                title="Review Project Blueprint"
+                description="The AI has generated a blueprint. Review and edit the JSON below, then approve to start building."
+            />
+            <Card className="p-0 flex flex-col flex-grow overflow-hidden">
+                <Textarea
+                    id="blueprint-editor"
+                    value={blueprintText}
+                    onChange={(e) => setWorkshopState(p => ({...p, blueprintText: e.target.value }))}
+                    className="!bg-background font-mono text-xs flex-grow !border-0 focus:!ring-0"
+                />
+            </Card>
+            <div className="mt-4 flex justify-between items-center flex-shrink-0">
+                <Button onClick={resetState} variant="secondary">Start Over</Button>
+                {error && <p className="text-red-500 text-sm">{error}</p>}
+                <Button onClick={handleApproveBlueprint} size="lg">Approve & Build Project</Button>
             </div>
         </div>
     );
   }
 
   const OutputPanel = ({isFullScreen = false} : {isFullScreen?: boolean}) => (
-    <Card className="flex-1 flex flex-col bg-black/70 backdrop-blur-sm border border-glow-green/40" padding="none">
-        <div className="flex-shrink-0 p-2 border-b border-glow-green/40 flex justify-between items-center">
+    <Card className="flex-1 flex flex-col" padding="none">
+        <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
              <div className="flex items-center gap-2">
-                    <GlowTabButton 
+                    <TabButton 
                         tabId="preview" 
                         icon={<EyeIcon className="w-4 h-4"/>} 
                         activeTab={activeOutputTab} 
@@ -447,20 +432,20 @@ When asked to provide code, use markdown code blocks. The user can apply your co
                         disabled={!previewFile}
                     >
                         Preview
-                    </GlowTabButton>
-                    <GlowTabButton 
+                    </TabButton>
+                    <TabButton 
                         tabId="terminal" 
                         icon={<TerminalIcon className="w-4 h-4"/>} 
                         activeTab={activeOutputTab} 
                         setTab={(t) => setWorkshopState(p=>({...p, activeOutputTab: t}))}
                     >
                         Terminal
-                    </GlowTabButton>
+                    </TabButton>
              </div>
              {isFullScreen && (
                 <div className="flex items-center gap-2">
-                    <Button size="sm" variant="tertiary" className="!text-glow-green hover:!bg-glow-green/10" onClick={() => setPreviewKey(Date.now())} title="Refresh Preview"><ArrowPathIcon className="w-4 h-4"/></Button>
-                    <Button size="sm" variant="tertiary" className="!text-glow-green hover:!bg-glow-green/10" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: false}))}>
+                    <Button size="sm" variant="tertiary" onClick={() => setPreviewKey(Date.now())} title="Refresh Preview"><ArrowPathIcon className="w-4 h-4"/></Button>
+                    <Button size="sm" variant="tertiary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: false}))}>
                         <ArrowsPointingInIcon className="w-4 h-4 mr-1"/>Exit
                     </Button>
                 </div>
@@ -471,13 +456,13 @@ When asked to provide code, use markdown code blocks. The user can apply your co
                 previewFile ? (
                     <iframe key={previewKey} srcDoc={previewFile.content} className="w-full h-full border-0" sandbox="allow-scripts allow-modals allow-popups allow-forms" title="Live Preview"/>
                 ) : (
-                    <div className="w-full h-full flex items-center justify-center text-center p-4 bg-black">
-                        <p className="text-glow-green/50">Create an `index.html` file to see a live preview.</p>
+                    <div className="w-full h-full flex items-center justify-center text-center p-4 bg-background">
+                        <p className="text-on-surface-variant/70">Create an `index.html` file to see a live preview.</p>
                     </div>
                 )
             ) : (
-                <div className="w-full h-full bg-black text-glow-green/90 p-2 font-mono text-xs whitespace-pre-wrap overflow-y-auto">
-                   {terminalOutput ? <pre>{terminalOutput}</pre> : <div className="text-glow-green/50">Terminal output from running code will appear here.</div>}
+                <div className="w-full h-full bg-black text-on-surface-variant p-2 font-mono text-xs whitespace-pre-wrap overflow-y-auto">
+                   {terminalOutput ? <pre>{terminalOutput}</pre> : <div className="text-on-surface-variant/70">Terminal output from running code will appear here.</div>}
                 </div>
             )}
         </div>
@@ -486,48 +471,46 @@ When asked to provide code, use markdown code blocks. The user can apply your co
 
   return (
     <>
-    <div className={`relative bg-black font-mono animate-fade-in h-full flex-col ${isPreviewFullscreen ? 'hidden' : 'flex'}`}>
-        <div className="absolute inset-0 grid-bg opacity-20 z-0"></div>
-        <div className="absolute inset-0 scanline animate-scanline z-0"></div>
-        <div className="relative z-10 h-full flex flex-col p-4">
+    <div className={`h-full flex flex-col ${isPreviewFullscreen ? 'hidden' : 'flex'}`}>
+        <div className="h-full flex flex-col p-4">
             <div className="flex justify-between items-center mb-4 flex-shrink-0">
-                <div><h2 className="text-2xl font-bold text-glow animate-text-flicker">{blueprint?.projectName}</h2><p className="text-glow-green/70">{blueprint?.description}</p></div>
-                <Button onClick={resetState} variant="secondary" className="!border-glow-green/50 !text-glow-green hover:!bg-glow-green/20">Start Over</Button>
+                <div><h2 className="text-2xl font-bold text-on-surface">{blueprint?.projectName}</h2><p className="text-on-surface-variant">{blueprint?.description}</p></div>
+                <Button onClick={resetState} variant="secondary">Start Over</Button>
             </div>
 
             <div className="flex-grow flex gap-4 overflow-hidden">
-                <Card className="w-64 flex-shrink-0 flex flex-col bg-black/70 backdrop-blur-sm border border-glow-green/40" padding="none">
-                    <h3 className="font-semibold text-sm px-4 py-2 text-glow border-b border-glow-green/40">Files</h3>
-                    <div className="p-2 overflow-y-auto flex-grow">{projectFiles.map(file => (<button key={file.fileName} onClick={() => handleSelectFile(file.fileName)} className={`w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm transition-colors ${selectedFileName === file.fileName ? 'bg-glow-green/20 text-glow-green font-bold' : 'text-glow-green/70 hover:bg-glow-green/10'}`}><DocumentTextIcon className="w-4 h-4 flex-shrink-0" /><span className="truncate">{file.fileName}</span></button>))}</div>
+                <Card className="w-64 flex-shrink-0 flex flex-col" padding="none">
+                    <h3 className="font-semibold text-sm px-4 py-2 text-on-surface border-b border-border-color">Files</h3>
+                    <div className="p-2 overflow-y-auto flex-grow">{projectFiles.map(file => (<button key={file.fileName} onClick={() => handleSelectFile(file.fileName)} className={`w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm transition-colors ${selectedFileName === file.fileName ? 'bg-primary-light text-primary font-medium' : 'text-on-surface-variant hover:bg-surface'}`}><DocumentTextIcon className="w-4 h-4 flex-shrink-0" /><span className="truncate">{file.fileName}</span></button>))}</div>
                 </Card>
                 
                 <div className="flex-1 flex flex-col gap-4 overflow-hidden">
-                    <Card className={`flex flex-col ${showOutputPanel ? 'flex-[2]' : 'flex-1'} bg-black/70 backdrop-blur-sm border border-glow-green/40`} padding="none">
-                        <div className="flex-shrink-0 p-2 border-b border-glow-green/40 flex justify-between items-center">
-                            <span className="font-mono text-sm pl-2 flex items-center gap-2 text-glow-green"><CodeIcon className="w-4 h-4"/>{selectedFileName || 'No file selected'}</span>
+                    <Card className={`flex flex-col ${showOutputPanel ? 'flex-[2]' : 'flex-1'}`} padding="none">
+                        <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
+                            <span className="font-mono text-sm pl-2 flex items-center gap-2 text-on-surface"><CodeIcon className="w-4 h-4"/>{selectedFileName || 'No file selected'}</span>
                             <div className="flex items-center gap-2">
-                                <Button size="sm" variant="tertiary" className="!text-glow-green hover:!bg-glow-green/10" onClick={handleRunCode} isLoading={isLoading && loadingMessage.startsWith('Running')} title="Run Code">
+                                <Button size="sm" variant="tertiary" onClick={handleRunCode} isLoading={isLoading && loadingMessage.startsWith('Running')} title="Run Code">
                                     <PlayIcon className="w-4 h-4"/>
                                 </Button>
-                                <Button size="sm" variant="tertiary" className="!text-glow-green hover:!bg-glow-green/10" onClick={() => setWorkshopState(p => ({...p, showOutputPanel: !p.showOutputPanel}))} title={showOutputPanel ? "Hide Output" : "Show Output"}>
+                                <Button size="sm" variant="tertiary" onClick={() => setWorkshopState(p => ({...p, showOutputPanel: !p.showOutputPanel}))} title={showOutputPanel ? "Hide Output" : "Show Output"}>
                                     <EyeIcon className="w-4 h-4"/>
                                 </Button>
-                                <Button size="sm" variant="tertiary" className="!text-glow-green hover:!bg-glow-green/10" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: true, showOutputPanel: true}))} title="Fullscreen Preview" disabled={!previewFile}>
+                                <Button size="sm" variant="tertiary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: true, showOutputPanel: true}))} title="Fullscreen Preview" disabled={!previewFile}>
                                     <ArrowsPointingOutIcon className="w-4 h-4"/>
                                 </Button>
                             </div>
                         </div>
-                        <div className="flex-grow overflow-auto bg-black/80 relative">
+                        <div className="flex-grow overflow-auto bg-background relative">
                             {selectedFile ? (
                                 !selectedFile.content && !isLoading ? (
-                                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-10">
-                                        <p className="mb-4 text-glow-green/70">This file is empty.</p>
-                                        <Button onClick={() => generateFileContent(selectedFile.fileName)} isLoading={isLoading} disabled={isLoading} className="!bg-glow-green/90 hover:!bg-white !text-black !font-bold">
+                                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-background z-10">
+                                        <p className="mb-4 text-on-surface-variant">This file is empty.</p>
+                                        <Button onClick={() => generateFileContent(selectedFile.fileName)} isLoading={isLoading} disabled={isLoading}>
                                             {loadingMessage || `Generate Code for ${selectedFile.fileName}`}
                                         </Button>
                                     </div>
                                 ) : (<CodeBlock code={selectedFile.content} language={selectedFile.fileName.split('.').pop() || 'text'} />)
-                            ) : (<div className="w-full h-full flex items-center justify-center"><p className="text-glow-green/70">Select a file to view its content.</p></div>)}
+                            ) : (<div className="w-full h-full flex items-center justify-center"><p className="text-on-surface-variant">Select a file to view its content.</p></div>)}
                             {isLoading && <div className="absolute inset-0 flex items-center justify-center bg-black/50"><Spinner/></div>}
                         </div>
                     </Card>
@@ -536,57 +519,57 @@ When asked to provide code, use markdown code blocks. The user can apply your co
                     )}
                 </div>
 
-                <Card className="w-[450px] flex-shrink-0 flex flex-col bg-black/70 backdrop-blur-sm border border-glow-green/40" padding="none">
-                    <div className="flex-shrink-0 p-2 border-b border-glow-green/40 flex items-center gap-2">
-                        <GlowTabButton tabId="chat" icon={<ChatBubbleBottomCenterTextIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>AI Chat</GlowTabButton>
-                        <GlowTabButton tabId="console" icon={<TerminalIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>Logs {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}</GlowTabButton>
+                <Card className="w-[450px] flex-shrink-0 flex flex-col" padding="none">
+                    <div className="flex-shrink-0 p-2 border-b border-border-color flex items-center gap-2">
+                        <TabButton tabId="chat" icon={<ChatBubbleBottomCenterTextIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>AI Chat</TabButton>
+                        <TabButton tabId="console" icon={<TerminalIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>Logs {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}</TabButton>
                     </div>
 
                     {activeSideTab === 'console' && (
                         <div className="flex flex-col h-full overflow-hidden">
-                            <div className="flex-grow p-2 space-y-1 font-mono text-xs overflow-y-auto text-glow-green/70 flex flex-col-reverse">{consoleMessages.map(msg => (<div key={msg.id} className={`p-1.5 rounded flex justify-between items-start gap-2 text-wrap break-words ${msg.type === 'error' ? 'bg-red-500/20 text-red-300' : msg.type === 'warn' ? 'bg-yellow-500/20 text-yellow-300' : ''}`}><span className="opacity-60 flex-shrink-0">{new Date(msg.id).toLocaleTimeString()}</span><span className="flex-grow text-right">{msg.message}</span></div>))}</div>
-                            <div className="p-2 border-t border-glow-green/40"><Button size="sm" variant="tertiary" className="!text-glow-green/70 hover:!bg-glow-green/10" onClick={() => setWorkshopState(prev => ({...prev, consoleMessages: []}))}>Clear Logs</Button></div>
+                            <div className="flex-grow p-2 space-y-1 font-mono text-xs overflow-y-auto text-on-surface-variant flex flex-col-reverse">{consoleMessages.map(msg => (<div key={msg.id} className={`p-1.5 rounded flex justify-between items-start gap-2 text-wrap break-words ${msg.type === 'error' ? 'bg-red-500/20 text-red-300' : msg.type === 'warn' ? 'bg-yellow-500/20 text-yellow-300' : ''}`}><span className="opacity-60 flex-shrink-0">{new Date(msg.id).toLocaleTimeString()}</span><span className="flex-grow text-right">{msg.message}</span></div>))}</div>
+                            <div className="p-2 border-t border-border-color"><Button size="sm" variant="tertiary" onClick={() => setWorkshopState(prev => ({...prev, consoleMessages: []}))}>Clear Logs</Button></div>
                         </div>
                     )}
 
                     {activeSideTab === 'chat' && (
                         <div className="flex flex-col h-full overflow-hidden">
                             <div className="flex-grow p-4 space-y-4 overflow-y-auto">
-                                {chatMessages.length === 0 && <div className="text-center text-glow-green/60 text-sm p-4">Engage the AI. Request code, explanations, or improvements.</div>}
+                                {chatMessages.length === 0 && <div className="text-center text-on-surface-variant/70 text-sm p-4">Engage the AI. Request code, explanations, or improvements.</div>}
                                 {chatMessages.map((msg, index) => (
                                 <div key={index} className={`flex items-start gap-3 w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                     {msg.role === 'model' && (
-                                    <div className="w-8 h-8 rounded-full bg-glow-green/20 text-glow-green flex-shrink-0 flex items-center justify-center">
+                                    <div className="w-8 h-8 rounded-full bg-primary-light text-primary flex-shrink-0 flex items-center justify-center">
                                         <SparklesIcon className="w-5 h-5" />
                                     </div>
                                     )}
-                                    <div className={`px-4 py-3 rounded-lg max-w-full shadow-sm text-glow-green ${msg.role === 'user' ? 'bg-glow-green text-black' : 'bg-black/50'}`}>
+                                    <div className={`px-4 py-3 rounded-lg max-w-full shadow-sm ${msg.role === 'user' ? 'bg-primary text-background' : 'bg-surface'}`}>
                                         <ChatMessageDisplay text={msg.text} onApplyCode={handleApplyCodeChange} canApplyCode={!!selectedFileName} />
                                     </div>
                                 </div>
                                 ))}
                                 {isChatLoading && chatMessages[chatMessages.length - 1]?.role !== 'model' && (
                                     <div className="flex items-start gap-3">
-                                        <div className="w-8 h-8 rounded-full bg-glow-green/20 text-glow-green flex-shrink-0 flex items-center justify-center">
+                                        <div className="w-8 h-8 rounded-full bg-primary-light text-primary flex-shrink-0 flex items-center justify-center">
                                             <SparklesIcon className="w-5 h-5" />
                                         </div>
-                                        <div className="px-4 py-2 rounded-lg bg-black/50">
-                                            <span className="animate-pulse text-sm text-glow-green/70">...</span>
+                                        <div className="px-4 py-2 rounded-lg bg-surface">
+                                            <span className="animate-pulse text-sm text-on-surface-variant">...</span>
                                         </div>
                                     </div>
                                 )}
                             </div>
-                            <div className="p-4 border-t border-glow-green/40 bg-black/50">
+                            <div className="p-4 border-t border-border-color bg-surface">
                                 <div className="flex gap-2">
                                     <Input
                                         value={chatInput}
                                         onChange={(e) => setChatInput(e.target.value)}
                                         onKeyDown={(e) => e.key === 'Enter' && !isChatLoading && handleSendMessage()}
                                         placeholder="Message the AI..."
-                                        className="flex-1 !bg-black/50 !border-glow-green/50 !text-glow-green focus:!ring-glow-green"
+                                        className="flex-1"
                                         disabled={isChatLoading}
                                     />
-                                    <Button onClick={handleSendMessage} isLoading={isChatLoading} disabled={!chatInput.trim()} className="!bg-glow-green hover:!bg-white !text-black !font-bold">
+                                    <Button onClick={handleSendMessage} isLoading={isChatLoading} disabled={!chatInput.trim()}>
                                         Send
                                     </Button>
                                 </div>
@@ -597,7 +580,7 @@ When asked to provide code, use markdown code blocks. The user can apply your co
             </div>
         </div>
     </div>
-    {isPreviewFullscreen && <div className="fixed inset-0 z-50 flex flex-col bg-black p-4"><OutputPanel isFullScreen={true} /></div>}
+    {isPreviewFullscreen && <div className="fixed inset-0 z-50 flex flex-col bg-background p-4"><OutputPanel isFullScreen={true} /></div>}
     </>
   );
 };
