@@ -1,5 +1,7 @@
 
 
+
+
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Type, Chat } from '@google/genai';
 import { generateText, createChat, sendMessageStream, simulateExecution } from '../services/geminiService';
@@ -251,7 +253,7 @@ const FileNodeDisplay: React.FC<{
       </button>
       {isOpen && (
         <div className="pl-4 border-l border-border-color ml-2">
-          {Object.entries(node).sort((a, b) => a[0].localeCompare(b[0])).map(([childName, childNode]) => (
+          {Object.entries(node as FileTreeNode).sort((a, b) => a[0].localeCompare(b[0])).map(([childName, childNode]) => (
             <FileNodeDisplay key={childName} node={childNode} name={childName} selectedFile={selectedFile} onSelectFile={onSelectFile} path={currentPath} />
           ))}
         </div>
@@ -338,7 +340,11 @@ The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_
     try {
       const blueprintPrompt = `Generate a project blueprint for the following request: "${goal}". The project should be self-contained and runnable where possible. For web UIs, prioritize a single 'index.html' file with embedded CSS and JS. For backend apps (e.g., Python, Node.js), include a main runnable file (like app.py or index.js), a README.md explaining how to run it, and any necessary config files (like requirements.txt or package.json).`;
       const result = await generateText(blueprintPrompt, `You are a helpful AI architect. Respond with only a valid JSON object that conforms to the user's schema.`, 0.1, 1, 1);
-      const blueprintData: Blueprint = JSON.parse(result.text);
+      
+      // FIX: Clean the response to remove markdown fences before parsing
+      const cleanedText = result.text.replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/, '$1').trim();
+
+      const blueprintData: Blueprint = JSON.parse(cleanedText);
       setWorkshopState(prev => ({
         ...prev,
         stage: 'blueprint_review',
@@ -347,9 +353,15 @@ The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_
       }));
       logToConsole('Blueprint generated. Please review.');
     } catch (err: any) {
-      const errorMessage = err.message || 'An unknown error occurred during blueprint generation.';
-      setError(errorMessage);
-      logToConsole(errorMessage, 'error');
+        if (err instanceof SyntaxError) {
+            const errorMessage = `Failed to parse blueprint from AI. Please try again. Details: ${err.message}`;
+            setError(errorMessage);
+            logToConsole(errorMessage, 'error');
+        } else {
+            const errorMessage = err.message || 'An unknown error occurred during blueprint generation.';
+            setError(errorMessage);
+            logToConsole(errorMessage, 'error');
+        }
     } finally {
       setIsLoading(false);
       setLoadingMessage('');
