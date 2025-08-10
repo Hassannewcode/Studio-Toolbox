@@ -250,16 +250,34 @@ const FileNodeDisplay: React.FC<{
       </button>
       {isOpen && (
         <div className="pl-4 border-l border-border-color ml-2">
-            {Object.keys(node).sort().map(childName => {
-                // After the type guard, node is a FileTreeNode, so we can access its properties.
-                const childNode = (node as FileTreeNode)[childName];
-                return (<FileNodeDisplay key={childName} node={childNode} name={childName} selectedFile={selectedFile} onSelectFile={onSelectFile} path={currentPath} />)
-            })}
+            {Object.entries(node as FileTreeNode).sort(([a], [b]) => a.localeCompare(b)).map(([childName, childNode]) => (
+               <FileNodeDisplay key={childName} node={childNode} name={childName} selectedFile={selectedFile} onSelectFile={onSelectFile} path={currentPath} />
+            ))}
         </div>
       )}
     </div>
   );
 };
+
+const getMimeType = (fileName: string): string => {
+    const extension = fileName.split('.').pop()?.toLowerCase() || '';
+    switch (extension) {
+        case 'html': return 'text/html';
+        case 'css': return 'text/css';
+        case 'js': return 'application/javascript';
+        case 'json': return 'application/json';
+        case 'png': return 'image/png';
+        case 'jpg':
+        case 'jpeg': return 'image/jpeg';
+        case 'gif': return 'image/gif';
+        case 'svg': return 'image/svg+xml';
+        case 'woff': return 'font/woff';
+        case 'woff2': return 'font/woff2';
+        case 'ttf': return 'font/ttf';
+        default: return 'text/plain';
+    }
+};
+
 
 const DigitalWorkshop: React.FC = () => {
   const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v9', initialWorkshopState);
@@ -273,7 +291,10 @@ const DigitalWorkshop: React.FC = () => {
   const [chatMessages, setChatMessages] = usePersistentState<ChatMessage[]>(chatMessagesKey, []);
   const [chatInput, setChatInput] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
+  
   const [previewKey, setPreviewKey] = useState(Date.now());
+  const [previewSrcDoc, setPreviewSrcDoc] = useState<string>('');
+  const blobUrlsRef = useRef<string[]>([]);
 
   const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, isPreviewFullscreen, showOutputPanel, activeOutputTab, terminalOutput } = workshopState;
   
@@ -296,12 +317,51 @@ const DigitalWorkshop: React.FC = () => {
     return () => window.removeEventListener('message', handleMessage);
   }, [logToConsole]);
 
+  // Cleanup blob URLs on unmount
+  useEffect(() => {
+    return () => {
+        blobUrlsRef.current.forEach(URL.revokeObjectURL);
+    };
+  }, []);
+
   // Auto-refresh preview
   useEffect(() => {
-    if (previewFile?.content) {
-        setPreviewKey(Date.now());
+    const entryPoint = projectFiles.find(f => f.fileName.toLowerCase() === 'index.html');
+    if (!entryPoint) {
+        setPreviewSrcDoc(
+             `<div style="font-family: sans-serif; color: #9da0a5; display: flex; align-items: center; justify-content: center; height: 100%; background-color: #282a2e;">Create an 'index.html' file to see a live preview.</div>`
+        );
+        return;
     }
-  }, [previewFile?.content]);
+
+    // Revoke previous blob URLs to prevent memory leaks
+    blobUrlsRef.current.forEach(URL.revokeObjectURL);
+    const newBlobUrls: string[] = [];
+
+    const fileMap = new Map<string, string>();
+    projectFiles.forEach(file => {
+        const mimeType = getMimeType(file.fileName);
+        const blob = new Blob([file.content], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        newBlobUrls.push(url);
+        fileMap.set(file.fileName, url);
+    });
+    
+    blobUrlsRef.current = newBlobUrls;
+
+    let processedHtml = entryPoint.content;
+
+    // Replace all file references with blob URLs
+    fileMap.forEach((blobUrl, filePath) => {
+        const escapedPath = filePath.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+        const regex = new RegExp(`(href|src)=["'](?:\\.\\/)?${escapedPath}["']`, 'g');
+        processedHtml = processedHtml.replace(regex, `$1="${blobUrl}"`);
+    });
+
+    const finalSrcDoc = `<script>${consoleForwarderScript}</script>${processedHtml}`;
+    setPreviewSrcDoc(finalSrcDoc);
+    
+  }, [projectFiles, previewKey]);
 
   useEffect(() => {
     if (stage === 'build' && !chat && blueprint) {
@@ -651,13 +711,12 @@ The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_
         </div>
         <div className="flex-grow bg-white relative overflow-hidden">
             {activeOutputTab === 'preview' && (
-                previewFile ? (
-                    <iframe key={previewKey} srcDoc={`<script>${consoleForwarderScript}</script>${previewFile.content}`} className="w-full h-full border-0" sandbox="allow-scripts allow-modals allow-popups allow-forms" title="Live Preview"/>
-                ) : (
-                    <div className="w-full h-full flex items-center justify-center text-center p-4 bg-background">
-                        <p className="text-on-surface-variant/70">Create an `index.html` file to see a live preview.</p>
-                    </div>
-                )
+                <iframe 
+                    srcDoc={previewSrcDoc} 
+                    className="w-full h-full border-0 bg-surface" 
+                    sandbox="allow-scripts allow-modals allow-popups allow-forms allow-same-origin"
+                    title="Live Preview"
+                />
             )}
             {activeOutputTab === 'terminal' && (
                 <div className="w-full h-full bg-black text-on-surface-variant p-2 font-mono text-xs whitespace-pre-wrap overflow-y-auto">
