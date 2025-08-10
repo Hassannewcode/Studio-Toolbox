@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Type, Chat } from '@google/genai';
 import { generateJson, generateText, createChat, sendMessageStream, simulateExecution } from '../services/geminiService';
@@ -72,8 +73,7 @@ interface ConsoleMessage {
 }
 
 type BuildStage = 'ideation' | 'blueprint_review' | 'build';
-type ActiveSideTab = 'chat' | 'console';
-type ActiveOutputTab = 'preview' | 'terminal';
+type ActiveOutputTab = 'preview' | 'terminal' | 'console';
 
 interface WorkshopState {
     goal: string;
@@ -83,7 +83,6 @@ interface WorkshopState {
     projectFiles: ProjectFile[];
     selectedFileName: string | null;
     consoleMessages: ConsoleMessage[];
-    activeSideTab: ActiveSideTab;
     isPreviewFullscreen: boolean;
     showOutputPanel: boolean;
     activeOutputTab: ActiveOutputTab;
@@ -98,12 +97,43 @@ const initialWorkshopState: WorkshopState = {
     projectFiles: [],
     selectedFileName: null,
     consoleMessages: [],
-    activeSideTab: 'chat',
     isPreviewFullscreen: false,
     showOutputPanel: true,
     activeOutputTab: 'preview',
     terminalOutput: ''
 };
+
+const consoleForwarderScript = `
+    const seen = new WeakSet();
+    const replacer = (key, value) => {
+        if (typeof value === 'object' && value !== null) {
+            if (seen.has(value)) { return '[Circular]'; }
+            seen.add(value);
+        } else if (typeof value === 'function') {
+            return '[Function]';
+        }
+        return value;
+    };
+    const forwarder = (type) => (...args) => {
+        try {
+            const message = args.map(arg => typeof arg === 'string' ? arg : JSON.stringify(arg, replacer)).join(' ');
+            window.parent.postMessage({ source: 'iframe-console', type, message }, '*');
+        } catch (e) {
+            window.parent.postMessage({ source: 'iframe-console', type: 'error', message: 'Error forwarding console message.' }, '*');
+        }
+    };
+    window.console.log = forwarder('log');
+    window.console.error = forwarder('error');
+    window.console.warn = forwarder('warn');
+    window.console.info = forwarder('info');
+    window.addEventListener('error', (event) => {
+        forwarder('error')(event.message, 'at', event.filename + ':' + event.lineno);
+        event.preventDefault();
+    });
+    window.addEventListener('unhandledrejection', event => {
+        forwarder('error')('Unhandled promise rejection:', event.reason);
+    });
+`;
 
 const ChatMessageDisplay: React.FC<{ 
     text: string;
@@ -113,46 +143,34 @@ const ChatMessageDisplay: React.FC<{
     if (!text) return <span className="animate-pulse">...</span>;
 
     const codeBlockRegex = /```(\w*)\n([\s\S]+?)```/g;
-    const matches = Array.from(text.matchAll(codeBlockRegex));
+    const parts = text.split(codeBlockRegex);
     
-    if (matches.length === 0) {
-        return <p className="whitespace-pre-wrap text-sm">{text}</p>;
-    }
-
-    const elements: React.ReactNode[] = [];
-    let lastIndex = 0;
-
-    matches.forEach((match, i) => {
-        const [fullMatch, language, code] = match;
-        const matchIndex = match.index || 0;
-
-        if (matchIndex > lastIndex) {
-            elements.push(<p key={`text-${i}`} className="whitespace-pre-wrap">{text.substring(lastIndex, matchIndex)}</p>);
+    const elements = [];
+    for (let i = 0; i < parts.length; i++) {
+        if (i % 3 === 0) { // Text part
+            if (parts[i]) elements.push(<p key={`text-${i}`} className="whitespace-pre-wrap">{parts[i]}</p>);
+        } else if (i % 3 === 1) { // Language and Code part
+            const language = parts[i];
+            const code = parts[i+1];
+            elements.push(
+                <div key={`code-wrapper-${i}`} className="relative group/code">
+                    <CodeBlock code={code.trim()} language={language || 'text'} />
+                    {canApplyCode && (
+                        <Button 
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => onApplyCode(code.trim())}
+                            className="absolute top-2 right-14 !px-2 !py-1 text-xs opacity-0 group-hover/code:opacity-100 transition-opacity"
+                            title="Apply this code to the current file"
+                        >
+                            <PaintBrushIcon className="w-4 h-4 mr-1" />
+                            Apply
+                        </Button>
+                    )}
+                </div>
+            );
+            i += 1; // Skip the code part in the next iteration
         }
-
-        elements.push(
-            <div key={`code-wrapper-${i}`} className="relative group/code">
-                <CodeBlock code={code.trim()} language={language || 'text'} />
-                {canApplyCode && (
-                    <Button 
-                        size="sm"
-                        variant="secondary"
-                        onClick={() => onApplyCode(code.trim())}
-                        className="absolute top-2 right-14 !px-2 !py-1 text-xs opacity-0 group-hover/code:opacity-100 transition-opacity"
-                        title="Apply this code to the current file"
-                    >
-                        <PaintBrushIcon className="w-4 h-4 mr-1" />
-                        Apply
-                    </Button>
-                )}
-            </div>
-        );
-
-        lastIndex = matchIndex + fullMatch.length;
-    });
-
-    if (lastIndex < text.length) {
-        elements.push(<p key="text-last" className="whitespace-pre-wrap">{text.substring(lastIndex)}</p>);
     }
 
     return <div className="text-sm space-y-2">{elements}</div>;
@@ -160,36 +178,55 @@ const ChatMessageDisplay: React.FC<{
 
 
 const DigitalWorkshop: React.FC = () => {
-  const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v7', initialWorkshopState);
+  const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v8', initialWorkshopState);
   
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
 
   const [chat, setChat] = useState<Chat | null>(null);
-  const chatMessagesKey = `digitalWorkshop_chatMessages_${workshopState.blueprint?.projectName || 'default'}_v2`;
+  const chatMessagesKey = `digitalWorkshop_chatMessages_${workshopState.blueprint?.projectName || 'default'}_v3`;
   const [chatMessages, setChatMessages] = usePersistentState<ChatMessage[]>(chatMessagesKey, []);
   const [chatInput, setChatInput] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [previewKey, setPreviewKey] = useState(Date.now());
 
 
-  const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, activeSideTab, isPreviewFullscreen, showOutputPanel, activeOutputTab, terminalOutput } = workshopState;
+  const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, isPreviewFullscreen, showOutputPanel, activeOutputTab, terminalOutput } = workshopState;
   
   const selectedFile = projectFiles.find(f => f.fileName === selectedFileName) || null;
   const previewFile = projectFiles.find(f => f.fileName.toLowerCase() === 'index.html');
 
   const logToConsole = useCallback((message: string, type: ConsoleMessage['type'] = 'info') => {
-    setWorkshopState(prev => ({...prev, consoleMessages: [{ id: Date.now(), type, message }, ...prev.consoleMessages]}));
+    setWorkshopState(prev => ({...prev, consoleMessages: [{ id: Date.now(), type, message }, ...prev.consoleMessages].slice(0, 100)}));
   }, [setWorkshopState]);
   
+  // Console forwarder listener
   useEffect(() => {
-    if (stage === 'build' && !chat) {
+    const handleMessage = (event: MessageEvent) => {
+        if (event.data && event.data.source === 'iframe-console') {
+            logToConsole(`[PREVIEW] ${event.data.message}`, event.data.type);
+        }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [logToConsole]);
+
+  // Auto-refresh preview
+  useEffect(() => {
+    if (previewFile?.content) {
+        setPreviewKey(Date.now());
+    }
+  }, [previewFile?.content]);
+
+  useEffect(() => {
+    if (stage === 'build' && !chat && blueprint) {
         const systemInstruction = `You are an AI pair programmer in a development environment.
-The project is "${blueprint?.projectName}". Description: "${blueprint?.description}".
+The project is "${blueprint.projectName}". Description: "${blueprint.description}".
 The project files are: ${projectFiles.map(f => f.fileName).join(', ')}.
-The user will provide context on which file they are viewing. Be helpful and concise.
-When asked to provide code, use markdown code blocks. The user can apply your code suggestions to the current file with a single click.`;
+The user will provide you with the current file they are editing and a request.
+Your task is to provide the *complete, updated file content* that includes their requested changes.
+Be helpful and concise. When providing code, use markdown code blocks. The user can apply your code suggestions to the current file with a single click.`;
         setChat(createChat(systemInstruction));
     }
   }, [stage, blueprint, projectFiles, chat]);
@@ -223,6 +260,32 @@ When asked to provide code, use markdown code blocks. The user can apply your co
     }
   };
   
+  const generateAllFiles = async (approvedBlueprint: Blueprint) => {
+    setIsLoading(true);
+    logToConsole('Generating all project files...', 'info');
+    let generatedFiles: ProjectFile[] = [];
+
+    for (const fileInfo of approvedBlueprint.files) {
+        setLoadingMessage(`Generating ${fileInfo.fileName}...`);
+        logToConsole(`Generating code for ${fileInfo.fileName}...`, 'info');
+        try {
+            const prompt = `Based on the project blueprint for "${approvedBlueprint.projectName}", generate complete, production-ready code for the file: ${fileInfo.fileName}. File Description: ${fileInfo.description}. IMPORTANT: Only output the raw code content for the file. Do not include any explanatory text, markdown formatting like \`\`\`, or anything that is not part of the file's content.`;
+            const result = await generateText(prompt, 'You are an expert software engineer.', 0.1, 1, 1);
+            const content = result.text.replace(/^```(?:\w+\n)?([\s\S]+)```$/, '$1').trim();
+            generatedFiles.push({ ...fileInfo, content });
+            setWorkshopState(prev => ({...prev, projectFiles: [...generatedFiles, ...approvedBlueprint.files.slice(generatedFiles.length).map(f => ({...f, content:''}))] }));
+            logToConsole(`Code for ${fileInfo.fileName} generated successfully.`);
+        } catch(err: any) {
+            logToConsole(`Error generating code for ${fileInfo.fileName}: ${err.message}`, 'error');
+            generatedFiles.push({ ...fileInfo, content: `// Error generating file: ${err.message}` });
+        }
+    }
+    setWorkshopState(prev => ({...prev, projectFiles: generatedFiles }));
+    logToConsole('All project files generated!', 'info');
+    setIsLoading(false);
+    setLoadingMessage('');
+  };
+
   const handleApproveBlueprint = () => {
       try {
         const approvedBlueprint: Blueprint = JSON.parse(blueprintText);
@@ -237,37 +300,11 @@ When asked to provide code, use markdown code blocks. The user can apply your co
         }));
         logToConsole(`Blueprint approved. Project "${approvedBlueprint.projectName}" scaffolded.`);
         if (firstFile) handleSelectFile(firstFile, files);
+        generateAllFiles(approvedBlueprint);
       } catch (e: any) {
           logToConsole(`Invalid blueprint JSON: ${e.message}`, 'error');
           setError(`Blueprint is not valid JSON. Please fix it before proceeding.`);
       }
-  };
-
-  const generateFileContent = async (fileName: string) => {
-    if (!blueprint) return;
-    setIsLoading(true);
-    setLoadingMessage(`Generating code for ${fileName}...`);
-    logToConsole(`Generating code for ${fileName}...`, 'info');
-    try {
-        const fileInfo = blueprint.files.find(f => f.fileName === fileName);
-        if (!fileInfo) throw new Error(`File ${fileName} not found in blueprint.`);
-
-        const prompt = `Based on the project blueprint, generate complete, production-ready code for the file: ${fileName}. File Description: ${fileInfo.description}. IMPORTANT: Only output the raw code content for the file. Do not include any explanatory text, markdown formatting like \`\`\`, or anything that is not part of the file's content.`;
-        const result = await generateText(prompt, 'You are an expert software engineer.', 0.1, 1, 1);
-        const content = result.text.replace(/^```(?:\w+\n)?([\s\S]+)```$/, '$1').trim();
-        
-        setWorkshopState(prev => ({
-            ...prev,
-            projectFiles: prev.projectFiles.map(f => f.fileName === fileName ? { ...f, content } : f)
-        }));
-        logToConsole(`Code for ${fileName} generated successfully.`);
-
-    } catch (err: any) {
-        logToConsole(`Error generating code for ${fileName}: ${err.message}`, 'error');
-    } finally {
-        setIsLoading(false);
-        setLoadingMessage('');
-    }
   };
 
   const handleRunCode = async () => {
@@ -282,7 +319,7 @@ When asked to provide code, use markdown code blocks. The user can apply your co
     } else if (extension && ['py', 'js', 'ts', 'go', 'sh', 'bash'].includes(extension)) {
         setWorkshopState(p => ({ ...p, activeOutputTab: 'terminal', terminalOutput: '' }));
         setIsLoading(true);
-        setLoadingMessage(`Running ${fileName}...`);
+        setLoadingMessage(`Simulating ${fileName}...`);
         logToConsole(`Simulating execution for ${fileName}...`, 'info');
         try {
             const languageMap: { [key: string]: string } = { 'js': 'javascript', 'py': 'python', 'ts': 'typescript', 'go': 'go', 'sh': 'bash' };
@@ -301,7 +338,7 @@ When asked to provide code, use markdown code blocks. The user can apply your co
     } else {
         logToConsole(`Cannot run file type: .${extension}. Only web previews and script execution are supported.`, 'warn');
     }
-};
+  };
   
   const handleApplyCodeChange = (codeToApply: string) => {
     if (!selectedFileName) return;
@@ -317,8 +354,7 @@ When asked to provide code, use markdown code blocks. The user can apply your co
   const handleSendMessage = async () => {
     if (!chatInput.trim() || !chat || isChatLoading) return;
     
-    const context = `The user is currently viewing the file: ${selectedFileName || 'none'}.`;
-    const fullPrompt = `${context}\n\nUser question: ${chatInput}`;
+    const context = `The user is currently editing the file: "${selectedFileName}". Here is the full content of that file:\n\n\`\`\`${selectedFile?.content || ''}\`\`\`\n\nUser's edit request: "${chatInput}"`;
     
     const newUserMessage: ChatMessage = { role: 'user', text: chatInput };
     setChatMessages(prev => [...prev, newUserMessage]);
@@ -326,7 +362,7 @@ When asked to provide code, use markdown code blocks. The user can apply your co
     setIsChatLoading(true);
     
     try {
-        const stream = await sendMessageStream(chat, fullPrompt);
+        const stream = await sendMessageStream(chat, context);
         let modelResponse = '';
         setChatMessages(prev => [...prev, { role: 'model', text: '' }]);
         for await (const chunk of stream) {
@@ -346,7 +382,7 @@ When asked to provide code, use markdown code blocks. The user can apply your co
     }
   }
   
-  const TabButton: React.FC<{tabId: any, activeTab: any, setTab: (tab: any) => void, icon: React.ReactNode, children: React.ReactNode, disabled?: boolean}> = ({ tabId, icon, children, activeTab, setTab, disabled }) => (
+  const OutputTabButton: React.FC<{tabId: ActiveOutputTab, activeTab: ActiveOutputTab, setTab: (tab: ActiveOutputTab) => void, icon: React.ReactNode, children: React.ReactNode, disabled?: boolean}> = ({ tabId, icon, children, activeTab, setTab, disabled }) => (
     <button onClick={() => setTab(tabId)} disabled={disabled} className={`flex items-center gap-2 px-3 py-1.5 text-xs rounded-md transition-colors ${activeTab === tabId ? 'bg-primary text-white font-medium' : 'bg-surface text-on-surface-variant hover:bg-border-color'} disabled:opacity-50 disabled:cursor-not-allowed`}>
         {icon}
         {children}
@@ -360,14 +396,19 @@ When asked to provide code, use markdown code blocks. The user can apply your co
 
   const handleSelectFile = (fileName: string, currentFiles = projectFiles) => {
     const extension = fileName.split('.').pop()?.toLowerCase();
-    const isBackendExecutable = extension && ['py', 'go', 'sh', 'rb', 'java'].includes(extension);
+    const isBackendExecutable = extension && ['py', 'go', 'sh', 'rb', 'java', 'js', 'ts'].includes(extension);
     
     setWorkshopState(prev => ({
         ...prev,
         selectedFileName: fileName,
         activeOutputTab: isBackendExecutable ? 'terminal' : 'preview'
     }));
-};
+  };
+
+  const handleCodeChange = (newContent: string) => {
+      if (!selectedFileName) return;
+      setWorkshopState(p => ({...p, projectFiles: p.projectFiles.map(f => f.fileName === selectedFileName ? {...f, content: newContent} : f)}));
+  }
 
   if (stage === 'ideation') {
     return (
@@ -408,7 +449,7 @@ When asked to provide code, use markdown code blocks. The user can apply your co
                     id="blueprint-editor"
                     value={blueprintText}
                     onChange={(e) => setWorkshopState(p => ({...p, blueprintText: e.target.value }))}
-                    className="!bg-background font-mono text-xs flex-grow !border-0 focus:!ring-0"
+                    className="!bg-background font-mono text-xs flex-grow !border-0 focus:!ring-0 resize-none"
                 />
             </Card>
             <div className="mt-4 flex justify-between items-center flex-shrink-0">
@@ -421,10 +462,10 @@ When asked to provide code, use markdown code blocks. The user can apply your co
   }
 
   const OutputPanel = ({isFullScreen = false} : {isFullScreen?: boolean}) => (
-    <Card className="flex-1 flex flex-col" padding="none">
+    <Card className="flex-1 flex flex-col min-h-0" padding="none">
         <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
              <div className="flex items-center gap-2">
-                    <TabButton 
+                    <OutputTabButton 
                         tabId="preview" 
                         icon={<EyeIcon className="w-4 h-4"/>} 
                         activeTab={activeOutputTab} 
@@ -432,37 +473,52 @@ When asked to provide code, use markdown code blocks. The user can apply your co
                         disabled={!previewFile}
                     >
                         Preview
-                    </TabButton>
-                    <TabButton 
+                    </OutputTabButton>
+                    <OutputTabButton 
                         tabId="terminal" 
                         icon={<TerminalIcon className="w-4 h-4"/>} 
                         activeTab={activeOutputTab} 
                         setTab={(t) => setWorkshopState(p=>({...p, activeOutputTab: t}))}
                     >
                         Terminal
-                    </TabButton>
+                    </OutputTabButton>
+                    <OutputTabButton
+                        tabId="console"
+                        icon={<ChatBubbleBottomCenterTextIcon className="w-4 h-4" />}
+                        activeTab={activeOutputTab}
+                        setTab={(t) => setWorkshopState(p => ({ ...p, activeOutputTab: t }))}
+                    >
+                        Console {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}
+                    </OutputTabButton>
              </div>
              {isFullScreen && (
                 <div className="flex items-center gap-2">
                     <Button size="sm" variant="tertiary" onClick={() => setPreviewKey(Date.now())} title="Refresh Preview"><ArrowPathIcon className="w-4 h-4"/></Button>
                     <Button size="sm" variant="tertiary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: false}))}>
-                        <ArrowsPointingInIcon className="w-4 h-4 mr-1"/>Exit
+                        <ArrowsPointingInIcon className="w-4 h-4 mr-1"/>Exit Fullscreen
                     </Button>
                 </div>
             )}
         </div>
-        <div className="flex-grow bg-white relative">
-            {activeOutputTab === 'preview' ? (
+        <div className="flex-grow bg-white relative overflow-hidden">
+            {activeOutputTab === 'preview' && (
                 previewFile ? (
-                    <iframe key={previewKey} srcDoc={previewFile.content} className="w-full h-full border-0" sandbox="allow-scripts allow-modals allow-popups allow-forms" title="Live Preview"/>
+                    <iframe key={previewKey} srcDoc={`<script>${consoleForwarderScript}</script>${previewFile.content}`} className="w-full h-full border-0" sandbox="allow-scripts allow-modals allow-popups allow-forms" title="Live Preview"/>
                 ) : (
                     <div className="w-full h-full flex items-center justify-center text-center p-4 bg-background">
                         <p className="text-on-surface-variant/70">Create an `index.html` file to see a live preview.</p>
                     </div>
                 )
-            ) : (
+            )}
+            {activeOutputTab === 'terminal' && (
                 <div className="w-full h-full bg-black text-on-surface-variant p-2 font-mono text-xs whitespace-pre-wrap overflow-y-auto">
                    {terminalOutput ? <pre>{terminalOutput}</pre> : <div className="text-on-surface-variant/70">Terminal output from running code will appear here.</div>}
+                </div>
+            )}
+            {activeOutputTab === 'console' && (
+                 <div className="flex flex-col h-full overflow-hidden bg-background">
+                    <div className="flex-grow p-2 space-y-1 font-mono text-xs overflow-y-auto text-on-surface-variant flex flex-col-reverse">{consoleMessages.map(msg => (<div key={msg.id} className={`p-1.5 rounded flex justify-between items-start gap-2 text-wrap break-words ${msg.type === 'error' ? 'bg-red-500/20 text-red-300' : msg.type === 'warn' ? 'bg-yellow-500/20 text-yellow-300' : ''}`}><span className="opacity-60 flex-shrink-0">{new Date(msg.id).toLocaleTimeString()}</span><span className="flex-grow text-right">{msg.message}</span></div>))}</div>
+                    <div className="p-2 border-t border-border-color"><Button size="sm" variant="tertiary" onClick={() => setWorkshopState(prev => ({...prev, consoleMessages: []}))}>Clear Logs</Button></div>
                 </div>
             )}
         </div>
@@ -471,113 +527,102 @@ When asked to provide code, use markdown code blocks. The user can apply your co
 
   return (
     <>
-    <div className={`h-full flex flex-col ${isPreviewFullscreen ? 'hidden' : 'flex'}`}>
-        <div className="h-full flex flex-col p-4">
-            <div className="flex justify-between items-center mb-4 flex-shrink-0">
-                <div><h2 className="text-2xl font-bold text-on-surface">{blueprint?.projectName}</h2><p className="text-on-surface-variant">{blueprint?.description}</p></div>
-                <Button onClick={resetState} variant="secondary">Start Over</Button>
-            </div>
-
-            <div className="flex-grow flex gap-4 overflow-hidden">
-                <Card className="w-64 flex-shrink-0 flex flex-col" padding="none">
-                    <h3 className="font-semibold text-sm px-4 py-2 text-on-surface border-b border-border-color">Files</h3>
-                    <div className="p-2 overflow-y-auto flex-grow">{projectFiles.map(file => (<button key={file.fileName} onClick={() => handleSelectFile(file.fileName)} className={`w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm transition-colors ${selectedFileName === file.fileName ? 'bg-primary-light text-primary font-medium' : 'text-on-surface-variant hover:bg-surface'}`}><DocumentTextIcon className="w-4 h-4 flex-shrink-0" /><span className="truncate">{file.fileName}</span></button>))}</div>
-                </Card>
-                
-                <div className="flex-1 flex flex-col gap-4 overflow-hidden">
-                    <Card className={`flex flex-col ${showOutputPanel ? 'flex-[2]' : 'flex-1'}`} padding="none">
-                        <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
-                            <span className="font-mono text-sm pl-2 flex items-center gap-2 text-on-surface"><CodeIcon className="w-4 h-4"/>{selectedFileName || 'No file selected'}</span>
-                            <div className="flex items-center gap-2">
-                                <Button size="sm" variant="tertiary" onClick={handleRunCode} isLoading={isLoading && loadingMessage.startsWith('Running')} title="Run Code">
-                                    <PlayIcon className="w-4 h-4"/>
-                                </Button>
-                                <Button size="sm" variant="tertiary" onClick={() => setWorkshopState(p => ({...p, showOutputPanel: !p.showOutputPanel}))} title={showOutputPanel ? "Hide Output" : "Show Output"}>
-                                    <EyeIcon className="w-4 h-4"/>
-                                </Button>
-                                <Button size="sm" variant="tertiary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: true, showOutputPanel: true}))} title="Fullscreen Preview" disabled={!previewFile}>
-                                    <ArrowsPointingOutIcon className="w-4 h-4"/>
-                                </Button>
-                            </div>
-                        </div>
-                        <div className="flex-grow overflow-auto bg-background relative">
-                            {selectedFile ? (
-                                !selectedFile.content && !isLoading ? (
-                                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-background z-10">
-                                        <p className="mb-4 text-on-surface-variant">This file is empty.</p>
-                                        <Button onClick={() => generateFileContent(selectedFile.fileName)} isLoading={isLoading} disabled={isLoading}>
-                                            {loadingMessage || `Generate Code for ${selectedFile.fileName}`}
-                                        </Button>
-                                    </div>
-                                ) : (<CodeBlock code={selectedFile.content} language={selectedFile.fileName.split('.').pop() || 'text'} />)
-                            ) : (<div className="w-full h-full flex items-center justify-center"><p className="text-on-surface-variant">Select a file to view its content.</p></div>)}
-                            {isLoading && <div className="absolute inset-0 flex items-center justify-center bg-black/50"><Spinner/></div>}
-                        </div>
-                    </Card>
-                    {showOutputPanel && (
-                        <div className="flex-1 flex flex-col"><OutputPanel /></div>
-                    )}
+    <div className={`h-full flex flex-col ${isPreviewFullscreen ? 'hidden' : ''}`}>
+        <div className="flex-grow flex gap-4 p-4 overflow-hidden">
+            {/* File Explorer */}
+            <Card className="w-64 flex-shrink-0 flex flex-col" padding="none">
+                <div className="p-2 border-b border-border-color flex justify-between items-center">
+                    <h3 className="font-semibold text-sm px-2 text-on-surface">Files</h3>
+                    <Button onClick={resetState} variant="tertiary" size="sm" title="Start Over">Reset</Button>
                 </div>
-
-                <Card className="w-[450px] flex-shrink-0 flex flex-col" padding="none">
-                    <div className="flex-shrink-0 p-2 border-b border-border-color flex items-center gap-2">
-                        <TabButton tabId="chat" icon={<ChatBubbleBottomCenterTextIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>AI Chat</TabButton>
-                        <TabButton tabId="console" icon={<TerminalIcon className="w-4 h-4"/>} activeTab={activeSideTab} setTab={(t) => setWorkshopState(p=>({...p, activeSideTab: t}))}>Logs {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}</TabButton>
+                <div className="p-2 overflow-y-auto flex-grow">
+                    <p className="px-2 pb-2 text-xs text-on-surface-variant truncate font-semibold">{blueprint?.projectName}</p>
+                    {projectFiles.map(file => (<button key={file.fileName} onClick={() => handleSelectFile(file.fileName)} className={`w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm transition-colors ${selectedFileName === file.fileName ? 'bg-primary-light text-primary font-medium' : 'text-on-surface-variant hover:bg-surface'}`}><DocumentTextIcon className="w-4 h-4 flex-shrink-0" /><span className="truncate">{file.fileName}</span></button>))}
+                </div>
+            </Card>
+            
+            {/* Center Panel (Editor + Output) */}
+            <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+                <Card className={`flex flex-col ${showOutputPanel ? 'flex-[2]' : 'flex-1'}`} padding="none">
+                    <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
+                        <span className="font-mono text-sm pl-2 flex items-center gap-2 text-on-surface"><CodeIcon className="w-4 h-4"/>{selectedFileName || 'No file selected'}</span>
+                        <div className="flex items-center gap-2">
+                            <Button size="sm" variant="tertiary" onClick={handleRunCode} isLoading={isLoading && loadingMessage.startsWith('Simulating')} title="Run Code">
+                                <PlayIcon className="w-4 h-4"/>
+                            </Button>
+                            <Button size="sm" variant="tertiary" onClick={() => setWorkshopState(p => ({...p, showOutputPanel: !p.showOutputPanel}))} title={showOutputPanel ? "Hide Output" : "Show Output"}>
+                                <EyeIcon className="w-4 h-4"/>
+                            </Button>
+                            <Button size="sm" variant="tertiary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: true, showOutputPanel: true}))} title="Fullscreen Preview" disabled={!previewFile}>
+                                <ArrowsPointingOutIcon className="w-4 h-4"/>
+                            </Button>
+                        </div>
                     </div>
-
-                    {activeSideTab === 'console' && (
-                        <div className="flex flex-col h-full overflow-hidden">
-                            <div className="flex-grow p-2 space-y-1 font-mono text-xs overflow-y-auto text-on-surface-variant flex flex-col-reverse">{consoleMessages.map(msg => (<div key={msg.id} className={`p-1.5 rounded flex justify-between items-start gap-2 text-wrap break-words ${msg.type === 'error' ? 'bg-red-500/20 text-red-300' : msg.type === 'warn' ? 'bg-yellow-500/20 text-yellow-300' : ''}`}><span className="opacity-60 flex-shrink-0">{new Date(msg.id).toLocaleTimeString()}</span><span className="flex-grow text-right">{msg.message}</span></div>))}</div>
-                            <div className="p-2 border-t border-border-color"><Button size="sm" variant="tertiary" onClick={() => setWorkshopState(prev => ({...prev, consoleMessages: []}))}>Clear Logs</Button></div>
-                        </div>
-                    )}
-
-                    {activeSideTab === 'chat' && (
-                        <div className="flex flex-col h-full overflow-hidden">
-                            <div className="flex-grow p-4 space-y-4 overflow-y-auto">
-                                {chatMessages.length === 0 && <div className="text-center text-on-surface-variant/70 text-sm p-4">Engage the AI. Request code, explanations, or improvements.</div>}
-                                {chatMessages.map((msg, index) => (
-                                <div key={index} className={`flex items-start gap-3 w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                    {msg.role === 'model' && (
-                                    <div className="w-8 h-8 rounded-full bg-primary-light text-primary flex-shrink-0 flex items-center justify-center">
-                                        <SparklesIcon className="w-5 h-5" />
-                                    </div>
-                                    )}
-                                    <div className={`px-4 py-3 rounded-lg max-w-full shadow-sm ${msg.role === 'user' ? 'bg-primary text-background' : 'bg-surface'}`}>
-                                        <ChatMessageDisplay text={msg.text} onApplyCode={handleApplyCodeChange} canApplyCode={!!selectedFileName} />
-                                    </div>
-                                </div>
-                                ))}
-                                {isChatLoading && chatMessages[chatMessages.length - 1]?.role !== 'model' && (
-                                    <div className="flex items-start gap-3">
-                                        <div className="w-8 h-8 rounded-full bg-primary-light text-primary flex-shrink-0 flex items-center justify-center">
-                                            <SparklesIcon className="w-5 h-5" />
-                                        </div>
-                                        <div className="px-4 py-2 rounded-lg bg-surface">
-                                            <span className="animate-pulse text-sm text-on-surface-variant">...</span>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                            <div className="p-4 border-t border-border-color bg-surface">
-                                <div className="flex gap-2">
-                                    <Input
-                                        value={chatInput}
-                                        onChange={(e) => setChatInput(e.target.value)}
-                                        onKeyDown={(e) => e.key === 'Enter' && !isChatLoading && handleSendMessage()}
-                                        placeholder="Message the AI..."
-                                        className="flex-1"
-                                        disabled={isChatLoading}
-                                    />
-                                    <Button onClick={handleSendMessage} isLoading={isChatLoading} disabled={!chatInput.trim()}>
-                                        Send
-                                    </Button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
+                    <div className="flex-grow overflow-hidden bg-background relative">
+                        {selectedFile ? (
+                           <Textarea 
+                                value={selectedFile.content} 
+                                onChange={(e) => handleCodeChange(e.target.value)} 
+                                className="!bg-background !border-0 font-mono text-sm w-full h-full resize-none focus:!ring-0"
+                                placeholder={`// ${selectedFile.fileName} is empty. Ask the AI to write the code!`}
+                           />
+                        ) : (<div className="w-full h-full flex items-center justify-center"><p className="text-on-surface-variant">Select a file to view its content.</p></div>)}
+                        {isLoading && <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 text-white z-10"><Spinner/><p className="mt-2">{loadingMessage}</p></div>}
+                    </div>
                 </Card>
+                {showOutputPanel && (
+                    <div className="flex-1 flex flex-col min-h-0"><OutputPanel /></div>
+                )}
             </div>
+            
+            {/* AI Chat Sidebar */}
+            <Card className="w-[450px] flex-shrink-0 flex flex-col" padding="none">
+                 <div className="p-2 border-b border-border-color flex justify-between items-center">
+                    <h3 className="font-semibold text-sm px-2 text-on-surface flex items-center gap-2"><SparklesIcon className="w-4 h-4 text-primary"/>AI Pair Programmer</h3>
+                </div>
+                <div className="flex flex-col h-full overflow-hidden">
+                    <div className="flex-grow p-4 space-y-4 overflow-y-auto">
+                        {chatMessages.length === 0 && <div className="text-center text-on-surface-variant/70 text-sm p-4">Engage the AI. Request code, explanations, or improvements for the selected file.</div>}
+                        {chatMessages.map((msg, index) => (
+                        <div key={index} className={`flex items-start gap-3 w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            {msg.role === 'model' && (
+                            <div className="w-8 h-8 rounded-full bg-primary-light text-primary flex-shrink-0 flex items-center justify-center">
+                                <SparklesIcon className="w-5 h-5" />
+                            </div>
+                            )}
+                            <div className={`px-4 py-3 rounded-lg max-w-full shadow-sm ${msg.role === 'user' ? 'bg-primary text-background' : 'bg-surface'}`}>
+                                <ChatMessageDisplay text={msg.text} onApplyCode={handleApplyCodeChange} canApplyCode={!!selectedFileName} />
+                            </div>
+                        </div>
+                        ))}
+                        {isChatLoading && chatMessages[chatMessages.length - 1]?.role !== 'model' && (
+                            <div className="flex items-start gap-3">
+                                <div className="w-8 h-8 rounded-full bg-primary-light text-primary flex-shrink-0 flex items-center justify-center">
+                                    <SparklesIcon className="w-5 h-5" />
+                                </div>
+                                <div className="px-4 py-2 rounded-lg bg-surface">
+                                    <span className="animate-pulse text-sm text-on-surface-variant">...</span>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    <div className="p-4 border-t border-border-color bg-surface">
+                        <div className="flex gap-2">
+                            <Input
+                                value={chatInput}
+                                onChange={(e) => setChatInput(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && !isChatLoading && handleSendMessage()}
+                                placeholder="Message the AI..."
+                                className="flex-1"
+                                disabled={isChatLoading || !selectedFile}
+                            />
+                            <Button onClick={handleSendMessage} isLoading={isChatLoading} disabled={!chatInput.trim() || !selectedFile}>
+                                Send
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            </Card>
         </div>
     </div>
     {isPreviewFullscreen && <div className="fixed inset-0 z-50 flex flex-col bg-background p-4"><OutputPanel isFullScreen={true} /></div>}
