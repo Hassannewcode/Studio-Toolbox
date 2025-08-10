@@ -1,10 +1,7 @@
 
-
-
-
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Type, Chat } from '@google/genai';
-import { generateText, createChat, sendMessageStream, simulateExecution } from '../services/geminiService';
+import { generateText, createChat, sendMessageStream, simulateExecution, generateJson } from '../services/geminiService';
 import usePersistentState from '../hooks/usePersistentState';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -253,9 +250,11 @@ const FileNodeDisplay: React.FC<{
       </button>
       {isOpen && (
         <div className="pl-4 border-l border-border-color ml-2">
-          {Object.entries(node as FileTreeNode).sort((a, b) => a[0].localeCompare(b[0])).map(([childName, childNode]) => (
-            <FileNodeDisplay key={childName} node={childNode} name={childName} selectedFile={selectedFile} onSelectFile={onSelectFile} path={currentPath} />
-          ))}
+            {Object.keys(node).sort().map(childName => {
+                // After the type guard, node is a FileTreeNode, so we can access its properties.
+                const childNode = (node as FileTreeNode)[childName];
+                return (<FileNodeDisplay key={childName} node={childNode} name={childName} selectedFile={selectedFile} onSelectFile={onSelectFile} path={currentPath} />)
+            })}
         </div>
       )}
     </div>
@@ -339,9 +338,8 @@ The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_
     logToConsole('Starting project generation...');
     try {
       const blueprintPrompt = `Generate a project blueprint for the following request: "${goal}". The project should be self-contained and runnable where possible. For web UIs, prioritize a single 'index.html' file with embedded CSS and JS. For backend apps (e.g., Python, Node.js), include a main runnable file (like app.py or index.js), a README.md explaining how to run it, and any necessary config files (like requirements.txt or package.json).`;
-      const result = await generateText(blueprintPrompt, `You are a helpful AI architect. Respond with only a valid JSON object that conforms to the user's schema.`, 0.1, 1, 1);
+      const result = await generateJson(blueprintPrompt, blueprintSchema);
       
-      // FIX: Clean the response to remove markdown fences before parsing
       const cleanedText = result.text.replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/, '$1').trim();
 
       const blueprintData: Blueprint = JSON.parse(cleanedText);
