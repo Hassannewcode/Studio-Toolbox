@@ -1,7 +1,8 @@
 
+
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Type, Chat } from '@google/genai';
-import { generateJson, generateText, createChat, sendMessageStream, simulateExecution } from '../services/geminiService';
+import { generateText, createChat, sendMessageStream, simulateExecution } from '../services/geminiService';
 import usePersistentState from '../hooks/usePersistentState';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -18,11 +19,14 @@ import { ChatBubbleBottomCenterTextIcon } from '../components/icons/ChatBubbleBo
 import { SparklesIcon } from '../components/icons/SparklesIcon';
 import { ArrowPathIcon } from '../components/icons/ArrowPathIcon';
 import { Input } from '../components/ui/Input';
-import { type ChatMessage } from '../types';
+import { type ChatMessage, type AIActionPlan, type AIActionOperation, AIAction } from '../types';
 import { ArrowsPointingOutIcon } from '../components/icons/ArrowsPointingOutIcon';
 import { ArrowsPointingInIcon } from '../components/icons/ArrowsPointingInIcon';
-import { PaintBrushIcon } from '../components/icons/PaintBrushIcon';
 import { PlayIcon } from '../components/icons/PlayIcon';
+import { FolderIcon } from '../components/icons/FolderIcon';
+import { PlusCircleIcon } from '../components/icons/PlusCircleIcon';
+import { PencilIcon } from '../components/icons/PencilIcon';
+import { TrashIcon } from '../components/icons/TrashIcon';
 
 
 const blueprintSchema = {
@@ -103,6 +107,11 @@ const initialWorkshopState: WorkshopState = {
     terminalOutput: ''
 };
 
+// Types for file tree
+interface FileTreeNode {
+  [key: string]: FileTreeNode | ProjectFile;
+}
+
 const consoleForwarderScript = `
     const seen = new WeakSet();
     const replacer = (key, value) => {
@@ -135,67 +144,141 @@ const consoleForwarderScript = `
     });
 `;
 
-const ChatMessageDisplay: React.FC<{ 
-    text: string;
-    onApplyCode: (code: string) => void;
-    canApplyCode: boolean;
-}> = ({ text, onApplyCode, canApplyCode }) => {
-    if (!text) return <span className="animate-pulse">...</span>;
+const ChangeProposal: React.FC<{
+    plan: AIActionPlan,
+    onApply: (operations: AIActionOperation[]) => void,
+    onDiscard: () => void
+}> = ({ plan, onApply, onDiscard }) => {
+    const iconMap: { [key in AIAction]: React.ReactNode } = {
+        CREATE_FILE: <PlusCircleIcon className="w-5 h-5 text-green-400" />,
+        UPDATE_FILE: <PencilIcon className="w-5 h-5 text-yellow-400" />,
+        DELETE_FILE: <TrashIcon className="w-5 h-5 text-red-400" />,
+        RENAME_FILE: <ArrowPathIcon className="w-5 h-5 text-blue-400" />,
+    };
 
-    const codeBlockRegex = /```(\w*)\n([\s\S]+?)```/g;
-    const parts = text.split(codeBlockRegex);
-    
-    const elements = [];
-    for (let i = 0; i < parts.length; i++) {
-        if (i % 3 === 0) { // Text part
-            if (parts[i]) elements.push(<p key={`text-${i}`} className="whitespace-pre-wrap">{parts[i]}</p>);
-        } else if (i % 3 === 1) { // Language and Code part
-            const language = parts[i];
-            const code = parts[i+1];
-            elements.push(
-                <div key={`code-wrapper-${i}`} className="relative group/code">
-                    <CodeBlock code={code.trim()} language={language || 'text'} />
-                    {canApplyCode && (
-                        <Button 
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => onApplyCode(code.trim())}
-                            className="absolute top-2 right-14 !px-2 !py-1 text-xs opacity-0 group-hover/code:opacity-100 transition-opacity"
-                            title="Apply this code to the current file"
-                        >
-                            <PaintBrushIcon className="w-4 h-4 mr-1" />
-                            Apply
-                        </Button>
-                    )}
-                </div>
-            );
-            i += 1; // Skip the code part in the next iteration
-        }
-    }
-
-    return <div className="text-sm space-y-2">{elements}</div>;
+    return (
+        <div className="bg-primary-light/50 border border-primary/50 rounded-lg p-3 mt-2 text-sm">
+            <p className="font-semibold text-on-surface mb-2">AI Proposed Changes:</p>
+            <p className="text-on-surface-variant italic mb-3 text-xs">"{plan.thought}"</p>
+            <div className="space-y-1 max-h-48 overflow-y-auto pr-2">
+                {plan.operations.map((op, index) => (
+                    <div key={index} className="flex items-center gap-2 bg-surface p-1.5 rounded-md">
+                        {iconMap[op.action]}
+                        <span className="font-mono text-xs text-on-surface-variant break-all">
+                            {op.path} {op.action === 'RENAME_FILE' && `-> ${op.newPath}`}
+                        </span>
+                    </div>
+                ))}
+            </div>
+            <div className="flex justify-end gap-2 mt-3">
+                <Button size="sm" variant="secondary" onClick={onDiscard}>Discard</Button>
+                <Button size="sm" variant="primary" onClick={() => onApply(plan.operations)}>Apply Changes</Button>
+            </div>
+        </div>
+    );
 };
 
+const ChatMessageDisplay: React.FC<{ message: ChatMessage, onApplyChanges: (operations: AIActionOperation[]) => void }> = ({ message, onApplyChanges }) => {
+    const [isApplied, setIsApplied] = useState(false);
+
+    const handleApply = (operations: AIActionOperation[]) => {
+        onApplyChanges(operations);
+        setIsApplied(true);
+    };
+
+    const handleDiscard = () => {
+        setIsApplied(true); // Effectively hides the buttons
+    };
+
+    return (
+        <div className="text-sm">
+            <p className="whitespace-pre-wrap">{message.text || <span className="animate-pulse">...</span>}</p>
+            {message.proposedPlan && !isApplied && (
+                <ChangeProposal plan={message.proposedPlan} onApply={handleApply} onDiscard={handleDiscard} />
+            )}
+        </div>
+    );
+};
+
+// Helper to build file tree
+const buildFileTree = (files: ProjectFile[]): FileTreeNode => {
+  const tree: FileTreeNode = {};
+  files.forEach(file => {
+    const parts = file.fileName.split('/');
+    let currentLevel = tree;
+    parts.forEach((part, index) => {
+      if (index === parts.length - 1) {
+        currentLevel[part] = file;
+      } else {
+        currentLevel[part] = currentLevel[part] || {};
+        currentLevel = currentLevel[part] as FileTreeNode;
+      }
+    });
+  });
+  return tree;
+};
+
+// Recursive component to display the file tree
+const FileNodeDisplay: React.FC<{
+  node: FileTreeNode | ProjectFile;
+  name: string;
+  selectedFile: string | null;
+  onSelectFile: (fileName: string) => void;
+  path?: string;
+}> = ({ node, name, selectedFile, onSelectFile, path = '' }) => {
+  const [isOpen, setIsOpen] = useState(true);
+  const currentPath = path ? `${path}/${name}` : name;
+
+  // Check if node is a file (has fileName property)
+  if ('fileName' in node) {
+    return (
+      <button
+        onClick={() => onSelectFile(node.fileName)}
+        className={`w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm transition-colors ${selectedFile === node.fileName ? 'bg-primary-light text-primary font-medium' : 'text-on-surface-variant hover:bg-surface'}`}
+      >
+        <DocumentTextIcon className="w-4 h-4 flex-shrink-0" />
+        <span className="truncate">{name}</span>
+      </button>
+    );
+  }
+
+  // It's a folder
+  return (
+    <div>
+      <button onClick={() => setIsOpen(!isOpen)} className="w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm text-on-surface-variant hover:bg-surface">
+        <FolderIcon className="w-4 h-4 flex-shrink-0" />
+        <span className="truncate font-medium">{name}</span>
+      </button>
+      {isOpen && (
+        <div className="pl-4 border-l border-border-color ml-2">
+          {Object.entries(node).sort((a, b) => a[0].localeCompare(b[0])).map(([childName, childNode]) => (
+            <FileNodeDisplay key={childName} node={childNode} name={childName} selectedFile={selectedFile} onSelectFile={onSelectFile} path={currentPath} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const DigitalWorkshop: React.FC = () => {
-  const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v8', initialWorkshopState);
+  const [workshopState, setWorkshopState] = usePersistentState<WorkshopState>('digitalWorkshop_v9', initialWorkshopState);
   
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
 
   const [chat, setChat] = useState<Chat | null>(null);
-  const chatMessagesKey = `digitalWorkshop_chatMessages_${workshopState.blueprint?.projectName || 'default'}_v3`;
+  const chatMessagesKey = `digitalWorkshop_chatMessages_${workshopState.blueprint?.projectName || 'default'}_v4`;
   const [chatMessages, setChatMessages] = usePersistentState<ChatMessage[]>(chatMessagesKey, []);
   const [chatInput, setChatInput] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [previewKey, setPreviewKey] = useState(Date.now());
 
-
   const { goal, stage, blueprint, blueprintText, projectFiles, selectedFileName, consoleMessages, isPreviewFullscreen, showOutputPanel, activeOutputTab, terminalOutput } = workshopState;
   
   const selectedFile = projectFiles.find(f => f.fileName === selectedFileName) || null;
   const previewFile = projectFiles.find(f => f.fileName.toLowerCase() === 'index.html');
+  const fileTree = buildFileTree(projectFiles);
 
   const logToConsole = useCallback((message: string, type: ConsoleMessage['type'] = 'info') => {
     setWorkshopState(prev => ({...prev, consoleMessages: [{ id: Date.now(), type, message }, ...prev.consoleMessages].slice(0, 100)}));
@@ -221,12 +304,25 @@ const DigitalWorkshop: React.FC = () => {
 
   useEffect(() => {
     if (stage === 'build' && !chat && blueprint) {
-        const systemInstruction = `You are an AI pair programmer in a development environment.
+        const systemInstruction = `You are an expert AI pair programmer.
 The project is "${blueprint.projectName}". Description: "${blueprint.description}".
 The project files are: ${projectFiles.map(f => f.fileName).join(', ')}.
-The user will provide you with the current file they are editing and a request.
-Your task is to provide the *complete, updated file content* that includes their requested changes.
-Be helpful and concise. When providing code, use markdown code blocks. The user can apply your code suggestions to the current file with a single click.`;
+When you need to make changes to the file system, you MUST respond with a JSON object inside a markdown block like this:
+\`\`\`json_actions
+{
+  "thought": "Here is my plan to implement the feature...",
+  "operations": [
+    { "action": "CREATE_FILE", "path": "src/style.css", "content": "body { ... }" },
+    { "action": "UPDATE_FILE", "path": "index.html", "content": "<!DOCTYPE html>..." }
+  ]
+}
+\`\`\`
+First, provide your 'thought' process streaming as regular text. Then, after your thoughts, provide the final \`\`\`json_actions\`\`\` block. Do not add any text after the block.
+The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_FILE".
+- For CREATE_FILE and UPDATE_FILE, you must provide the full file 'content'.
+- For RENAME_FILE, you must provide the 'path' of the file to rename and a 'newPath'.
+- Folders are created implicitly by creating a file with a nested path.
+- To delete a folder, use DELETE_FILE on all files within it.`;
         setChat(createChat(systemInstruction));
     }
   }, [stage, blueprint, projectFiles, chat]);
@@ -241,8 +337,8 @@ Be helpful and concise. When providing code, use markdown code blocks. The user 
     logToConsole('Starting project generation...');
     try {
       const blueprintPrompt = `Generate a project blueprint for the following request: "${goal}". The project should be self-contained and runnable where possible. For web UIs, prioritize a single 'index.html' file with embedded CSS and JS. For backend apps (e.g., Python, Node.js), include a main runnable file (like app.py or index.js), a README.md explaining how to run it, and any necessary config files (like requirements.txt or package.json).`;
-      const blueprintResult = await generateJson(blueprintPrompt, blueprintSchema);
-      const blueprintData: Blueprint = JSON.parse(blueprintResult.text);
+      const result = await generateText(blueprintPrompt, `You are a helpful AI architect. Respond with only a valid JSON object that conforms to the user's schema.`, 0.1, 1, 1);
+      const blueprintData: Blueprint = JSON.parse(result.text);
       setWorkshopState(prev => ({
         ...prev,
         stage: 'blueprint_review',
@@ -340,21 +436,42 @@ Be helpful and concise. When providing code, use markdown code blocks. The user 
     }
   };
   
-  const handleApplyCodeChange = (codeToApply: string) => {
-    if (!selectedFileName) return;
-    setWorkshopState(prev => ({
-        ...prev,
-        projectFiles: prev.projectFiles.map(f =>
-            f.fileName === selectedFileName ? { ...f, content: codeToApply } : f
-        )
-    }));
-    logToConsole(`Applied AI suggestion to ${selectedFileName}.`, 'info');
-  };
+    const applyChanges = (operations: AIActionOperation[]) => {
+        logToConsole('Applying AI changes...');
+        setWorkshopState(prev => {
+            let newFiles = [...prev.projectFiles];
+            for (const op of operations) {
+                switch (op.action) {
+                    case 'CREATE_FILE':
+                        if (!newFiles.some(f => f.fileName === op.path)) {
+                            newFiles.push({ fileName: op.path, content: op.content || '', description: 'File created by AI' });
+                            logToConsole(`CREATED: ${op.path}`);
+                        } else {
+                            logToConsole(`CREATE SKIPPED (exists): ${op.path}`, 'warn');
+                        }
+                        break;
+                    case 'UPDATE_FILE':
+                        newFiles = newFiles.map(f => f.fileName === op.path ? { ...f, content: op.content || '' } : f);
+                        logToConsole(`UPDATED: ${op.path}`);
+                        break;
+                    case 'DELETE_FILE':
+                        newFiles = newFiles.filter(f => f.fileName !== op.path);
+                        logToConsole(`DELETED: ${op.path}`);
+                        break;
+                    case 'RENAME_FILE':
+                        newFiles = newFiles.map(f => f.fileName === op.path ? { ...f, fileName: op.newPath || f.fileName } : f);
+                        logToConsole(`RENAMED: ${op.path} to ${op.newPath}`);
+                        break;
+                }
+            }
+            return { ...prev, projectFiles: newFiles };
+        });
+    };
   
   const handleSendMessage = async () => {
     if (!chatInput.trim() || !chat || isChatLoading) return;
     
-    const context = `The user is currently editing the file: "${selectedFileName}". Here is the full content of that file:\n\n\`\`\`${selectedFile?.content || ''}\`\`\`\n\nUser's edit request: "${chatInput}"`;
+    const context = `The user is currently editing the file: "${selectedFileName}". Here is the full content of that file:\n\n\`\`\`\n${selectedFile?.content || ''}\n\`\`\`\n\nUser's request: "${chatInput}"`;
     
     const newUserMessage: ChatMessage = { role: 'user', text: chatInput };
     setChatMessages(prev => [...prev, newUserMessage]);
@@ -364,19 +481,41 @@ Be helpful and concise. When providing code, use markdown code blocks. The user 
     try {
         const stream = await sendMessageStream(chat, context);
         let modelResponse = '';
-        setChatMessages(prev => [...prev, { role: 'model', text: '' }]);
+        const modelMessage: ChatMessage = { role: 'model', text: '' };
+        setChatMessages(prev => [...prev, modelMessage]);
+
         for await (const chunk of stream) {
             modelResponse += chunk.text;
             setChatMessages(prev => {
                 const newMessages = [...prev];
-                newMessages[newMessages.length - 1] = { role: 'model', text: modelResponse };
+                newMessages[newMessages.length - 1] = { ...newMessages[newMessages.length - 1], text: modelResponse };
                 return newMessages;
             });
         }
+        
+        // After stream, parse for action plan
+        const actionJsonRegex = /```json_actions\n([\s\S]+?)```/;
+        const match = modelResponse.match(actionJsonRegex);
+        if (match && match[1]) {
+            try {
+                const plan: AIActionPlan = JSON.parse(match[1]);
+                setChatMessages(prev => {
+                    const newMessages = [...prev];
+                    const lastMsg = newMessages[newMessages.length - 1];
+                    lastMsg.proposedPlan = plan;
+                    lastMsg.text = modelResponse.replace(actionJsonRegex, '').trim(); // Remove the JSON block from display text
+                    return newMessages;
+                });
+            } catch (e) {
+                logToConsole("Failed to parse AI action plan JSON.", "error");
+                console.error("AI Action Plan Parse Error:", e);
+            }
+        }
+
     } catch(e) {
         console.error(e);
         const errorMsg = {role: 'model' as const, text: 'Sorry, an error occurred.'};
-        setChatMessages(p => [...p, errorMsg]);
+        setChatMessages(p => [...p.slice(0, -1), errorMsg]);
     } finally {
         setIsChatLoading(false);
     }
@@ -537,7 +676,9 @@ Be helpful and concise. When providing code, use markdown code blocks. The user 
                 </div>
                 <div className="p-2 overflow-y-auto flex-grow">
                     <p className="px-2 pb-2 text-xs text-on-surface-variant truncate font-semibold">{blueprint?.projectName}</p>
-                    {projectFiles.map(file => (<button key={file.fileName} onClick={() => handleSelectFile(file.fileName)} className={`w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm transition-colors ${selectedFileName === file.fileName ? 'bg-primary-light text-primary font-medium' : 'text-on-surface-variant hover:bg-surface'}`}><DocumentTextIcon className="w-4 h-4 flex-shrink-0" /><span className="truncate">{file.fileName}</span></button>))}
+                    {Object.entries(fileTree).map(([name, node]) => (
+                        <FileNodeDisplay key={name} node={node} name={name} selectedFile={selectedFileName} onSelectFile={handleSelectFile} />
+                    ))}
                 </div>
             </Card>
             
@@ -591,7 +732,7 @@ Be helpful and concise. When providing code, use markdown code blocks. The user 
                             </div>
                             )}
                             <div className={`px-4 py-3 rounded-lg max-w-full shadow-sm ${msg.role === 'user' ? 'bg-primary text-background' : 'bg-surface'}`}>
-                                <ChatMessageDisplay text={msg.text} onApplyCode={handleApplyCodeChange} canApplyCode={!!selectedFileName} />
+                                <ChatMessageDisplay message={msg} onApplyChanges={applyChanges} />
                             </div>
                         </div>
                         ))}
