@@ -1,4 +1,5 @@
 
+
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Type, Chat } from '@google/genai';
 import { generateText, createChat, sendMessageStream, simulateExecution, generateJson } from '../services/geminiService';
@@ -217,19 +218,18 @@ const buildFileTree = (files: ProjectFile[]): FileTreeNode => {
   return tree;
 };
 
-// Recursive component to display the file tree
-const FileNodeDisplay: React.FC<{
+interface FileNodeDisplayProps {
   node: FileTreeNode | ProjectFile;
   name: string;
   selectedFile: string | null;
   onSelectFile: (fileName: string) => void;
-  path?: string;
-}> = ({ node, name, selectedFile, onSelectFile, path = '' }) => {
-  const [isOpen, setIsOpen] = useState(true);
-  const currentPath = path ? `${path}/${name}` : name;
+}
 
-  // Check if node is a file (has fileName property)
-  if ('fileName' in node) {
+// Recursive component to display the file tree
+const FileNodeDisplay: React.FC<FileNodeDisplayProps> = ({ node, name, selectedFile, onSelectFile }) => {
+  const [isOpen, setIsOpen] = useState(true);
+  
+  if ('fileName' in node) { // It's a file
     return (
       <button
         onClick={() => onSelectFile(node.fileName)}
@@ -244,14 +244,14 @@ const FileNodeDisplay: React.FC<{
   // It's a folder
   return (
     <div>
-      <button onClick={() => setIsOpen(!isOpen)} className="w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm text-on-surface-variant hover:bg-surface">
+      <button onClick={() => setIsOpen(!isOpen)} className="w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2 text-sm text-on-surface hover:bg-surface">
         <FolderIcon className="w-4 h-4 flex-shrink-0" />
-        <span className="truncate font-medium">{name}</span>
+        <span className="truncate font-medium text-on-surface-variant">{name}</span>
       </button>
       {isOpen && (
         <div className="pl-4 border-l border-border-color ml-2">
-            {Object.entries(node as FileTreeNode).sort(([a], [b]) => a.localeCompare(b)).map(([childName, childNode]) => (
-               <FileNodeDisplay key={childName} node={childNode} name={childName} selectedFile={selectedFile} onSelectFile={onSelectFile} path={currentPath} />
+            {Object.entries(node as FileTreeNode).sort((a, b) => a[0].localeCompare(b[0])).map(([childName, childNode]) => (
+               <FileNodeDisplay key={childName} node={childNode} name={childName} selectedFile={selectedFile} onSelectFile={onSelectFile} />
             ))}
         </div>
       )}
@@ -277,6 +277,100 @@ const getMimeType = (fileName: string): string => {
         default: return 'text/plain';
     }
 };
+
+const OutputTabButton: React.FC<{tabId: ActiveOutputTab, activeTab: ActiveOutputTab, setTab: (tab: ActiveOutputTab) => void, icon: React.ReactNode, children: React.ReactNode, disabled?: boolean}> = ({ tabId, icon, children, activeTab, setTab, disabled }) => (
+    <button onClick={() => setTab(tabId)} disabled={disabled} className={`flex items-center gap-2 px-3 py-1.5 text-xs rounded-md transition-colors ${activeTab === tabId ? 'bg-primary text-white font-medium' : 'bg-surface text-on-surface-variant hover:bg-border-color'} disabled:opacity-50 disabled:cursor-not-allowed`}>
+        {icon}
+        {children}
+    </button>
+);
+
+interface OutputPanelProps {
+    isFullScreen?: boolean;
+    activeOutputTab: ActiveOutputTab;
+    onTabChange: (tab: ActiveOutputTab) => void;
+    onRefreshPreview: () => void;
+    onExitFullscreen: () => void;
+    previewFile: ProjectFile | undefined;
+    previewSrcDoc: string;
+    terminalOutput: string;
+    consoleMessages: ConsoleMessage[];
+    onClearConsole: () => void;
+}
+
+const OutputPanel: React.FC<OutputPanelProps> = ({
+    isFullScreen = false,
+    activeOutputTab,
+    onTabChange,
+    onRefreshPreview,
+    onExitFullscreen,
+    previewFile,
+    previewSrcDoc,
+    terminalOutput,
+    consoleMessages,
+    onClearConsole
+}) => (
+    <Card className="flex-1 flex flex-col min-h-0" padding="none">
+        <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
+             <div className="flex items-center gap-2">
+                    <OutputTabButton 
+                        tabId="preview" 
+                        icon={<EyeIcon className="w-4 h-4"/>} 
+                        activeTab={activeOutputTab} 
+                        setTab={onTabChange}
+                        disabled={!previewFile}
+                    >
+                        Preview
+                    </OutputTabButton>
+                    <OutputTabButton 
+                        tabId="terminal" 
+                        icon={<TerminalIcon className="w-4 h-4"/>} 
+                        activeTab={activeOutputTab} 
+                        setTab={onTabChange}
+                    >
+                        Terminal
+                    </OutputTabButton>
+                    <OutputTabButton
+                        tabId="console"
+                        icon={<ChatBubbleBottomCenterTextIcon className="w-4 h-4" />}
+                        activeTab={activeOutputTab}
+                        setTab={onTabChange}
+                    >
+                        Console {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}
+                    </OutputTabButton>
+             </div>
+             {isFullScreen && (
+                <div className="flex items-center gap-2">
+                    <Button size="sm" variant="tertiary" onClick={onRefreshPreview} title="Refresh Preview"><ArrowPathIcon className="w-4 h-4"/></Button>
+                    <Button size="sm" variant="tertiary" onClick={onExitFullscreen}>
+                        <ArrowsPointingInIcon className="w-4 h-4 mr-1"/>Exit Fullscreen
+                    </Button>
+                </div>
+            )}
+        </div>
+        <div className="flex-grow bg-white relative overflow-hidden">
+            {activeOutputTab === 'preview' && (
+                <iframe 
+                    srcDoc={previewSrcDoc} 
+                    className="w-full h-full border-0 bg-surface" 
+                    sandbox="allow-scripts allow-modals allow-popups allow-forms allow-same-origin"
+                    title="Live Preview"
+                />
+            )}
+            {activeOutputTab === 'terminal' && (
+                <div className="w-full h-full bg-black text-on-surface-variant p-2 font-mono text-xs whitespace-pre-wrap overflow-y-auto">
+                   {terminalOutput ? <pre>{terminalOutput}</pre> : <div className="text-on-surface-variant/70">Terminal output from running code will appear here.</div>}
+                </div>
+            )}
+            {activeOutputTab === 'console' && (
+                 <div className="flex flex-col h-full overflow-hidden bg-background">
+                    <div className="flex-grow p-2 space-y-1 font-mono text-xs overflow-y-auto text-on-surface-variant flex flex-col-reverse">{consoleMessages.map(msg => (<div key={msg.id} className={`p-1.5 rounded flex justify-between items-start gap-2 text-wrap break-words ${msg.type === 'error' ? 'bg-red-500/20 text-red-300' : msg.type === 'warn' ? 'bg-yellow-500/20 text-yellow-300' : ''}`}><span className="opacity-60 flex-shrink-0">{new Date(msg.id).toLocaleTimeString()}</span><span className="flex-grow text-right">{msg.message}</span></div>))}</div>
+                    <div className="p-2 border-t border-border-color"><Button size="sm" variant="tertiary" onClick={onClearConsole}>Clear Logs</Button></div>
+                </div>
+            )}
+        </div>
+    </Card>
+);
 
 
 const DigitalWorkshop: React.FC = () => {
@@ -540,8 +634,22 @@ The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_
   
   const handleSendMessage = async () => {
     if (!chatInput.trim() || !chat || isChatLoading) return;
-    
-    const context = `The user is currently editing the file: "${selectedFileName}". Here is the full content of that file:\n\n\`\`\`\n${selectedFile?.content || ''}\n\`\`\`\n\nUser's request: "${chatInput}"`;
+
+    const fileTreeString = projectFiles.map(f => `- ${f.fileName}`).join('\n');
+    const context = `You are an expert AI pair programmer.
+The user is working on a project named "${blueprint?.projectName || 'Untitled Project'}".
+The project has the following file structure:
+${fileTreeString}
+
+The user is currently viewing the file: "${selectedFileName}".
+The content of that file is:
+\`\`\`
+${selectedFile?.content || '(This file is empty)'}
+\`\`\`
+
+User's request: "${chatInput}"
+
+Remember to respond with a \`\`\`json_actions\`\`\` block if you need to modify files. First, provide your 'thought' process as regular text, then, after your thoughts, provide the final json_actions block. Do not add any text after the block.`;
     
     const newUserMessage: ChatMessage = { role: 'user', text: chatInput };
     setChatMessages(prev => [...prev, newUserMessage]);
@@ -590,13 +698,6 @@ The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_
         setIsChatLoading(false);
     }
   }
-  
-  const OutputTabButton: React.FC<{tabId: ActiveOutputTab, activeTab: ActiveOutputTab, setTab: (tab: ActiveOutputTab) => void, icon: React.ReactNode, children: React.ReactNode, disabled?: boolean}> = ({ tabId, icon, children, activeTab, setTab, disabled }) => (
-    <button onClick={() => setTab(tabId)} disabled={disabled} className={`flex items-center gap-2 px-3 py-1.5 text-xs rounded-md transition-colors ${activeTab === tabId ? 'bg-primary text-white font-medium' : 'bg-surface text-on-surface-variant hover:bg-border-color'} disabled:opacity-50 disabled:cursor-not-allowed`}>
-        {icon}
-        {children}
-    </button>
-  );
 
   const resetState = () => {
       setWorkshopState(initialWorkshopState);
@@ -618,6 +719,8 @@ The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_
       if (!selectedFileName) return;
       setWorkshopState(p => ({...p, projectFiles: p.projectFiles.map(f => f.fileName === selectedFileName ? {...f, content: newContent} : f)}));
   }
+
+  const handleExitFullscreen = () => setWorkshopState(p => ({...p, isPreviewFullscreen: false}));
 
   if (stage === 'ideation') {
     return (
@@ -670,69 +773,6 @@ The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_
     );
   }
 
-  const OutputPanel = ({isFullScreen = false} : {isFullScreen?: boolean}) => (
-    <Card className="flex-1 flex flex-col min-h-0" padding="none">
-        <div className="flex-shrink-0 p-2 border-b border-border-color flex justify-between items-center">
-             <div className="flex items-center gap-2">
-                    <OutputTabButton 
-                        tabId="preview" 
-                        icon={<EyeIcon className="w-4 h-4"/>} 
-                        activeTab={activeOutputTab} 
-                        setTab={(t) => setWorkshopState(p=>({...p, activeOutputTab: t}))}
-                        disabled={!previewFile}
-                    >
-                        Preview
-                    </OutputTabButton>
-                    <OutputTabButton 
-                        tabId="terminal" 
-                        icon={<TerminalIcon className="w-4 h-4"/>} 
-                        activeTab={activeOutputTab} 
-                        setTab={(t) => setWorkshopState(p=>({...p, activeOutputTab: t}))}
-                    >
-                        Terminal
-                    </OutputTabButton>
-                    <OutputTabButton
-                        tabId="console"
-                        icon={<ChatBubbleBottomCenterTextIcon className="w-4 h-4" />}
-                        activeTab={activeOutputTab}
-                        setTab={(t) => setWorkshopState(p => ({ ...p, activeOutputTab: t }))}
-                    >
-                        Console {consoleMessages.some(m => m.type === 'error') && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}
-                    </OutputTabButton>
-             </div>
-             {isFullScreen && (
-                <div className="flex items-center gap-2">
-                    <Button size="sm" variant="tertiary" onClick={() => setPreviewKey(Date.now())} title="Refresh Preview"><ArrowPathIcon className="w-4 h-4"/></Button>
-                    <Button size="sm" variant="tertiary" onClick={() => setWorkshopState(p => ({...p, isPreviewFullscreen: false}))}>
-                        <ArrowsPointingInIcon className="w-4 h-4 mr-1"/>Exit Fullscreen
-                    </Button>
-                </div>
-            )}
-        </div>
-        <div className="flex-grow bg-white relative overflow-hidden">
-            {activeOutputTab === 'preview' && (
-                <iframe 
-                    srcDoc={previewSrcDoc} 
-                    className="w-full h-full border-0 bg-surface" 
-                    sandbox="allow-scripts allow-modals allow-popups allow-forms allow-same-origin"
-                    title="Live Preview"
-                />
-            )}
-            {activeOutputTab === 'terminal' && (
-                <div className="w-full h-full bg-black text-on-surface-variant p-2 font-mono text-xs whitespace-pre-wrap overflow-y-auto">
-                   {terminalOutput ? <pre>{terminalOutput}</pre> : <div className="text-on-surface-variant/70">Terminal output from running code will appear here.</div>}
-                </div>
-            )}
-            {activeOutputTab === 'console' && (
-                 <div className="flex flex-col h-full overflow-hidden bg-background">
-                    <div className="flex-grow p-2 space-y-1 font-mono text-xs overflow-y-auto text-on-surface-variant flex flex-col-reverse">{consoleMessages.map(msg => (<div key={msg.id} className={`p-1.5 rounded flex justify-between items-start gap-2 text-wrap break-words ${msg.type === 'error' ? 'bg-red-500/20 text-red-300' : msg.type === 'warn' ? 'bg-yellow-500/20 text-yellow-300' : ''}`}><span className="opacity-60 flex-shrink-0">{new Date(msg.id).toLocaleTimeString()}</span><span className="flex-grow text-right">{msg.message}</span></div>))}</div>
-                    <div className="p-2 border-t border-border-color"><Button size="sm" variant="tertiary" onClick={() => setWorkshopState(prev => ({...prev, consoleMessages: []}))}>Clear Logs</Button></div>
-                </div>
-            )}
-        </div>
-    </Card>
-  );
-
   return (
     <>
     <div className={`h-full flex flex-col ${isPreviewFullscreen ? 'hidden' : ''}`}>
@@ -781,7 +821,20 @@ The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_
                     </div>
                 </Card>
                 {showOutputPanel && (
-                    <div className="flex-1 flex flex-col min-h-0"><OutputPanel /></div>
+                    <div className="flex-1 flex flex-col min-h-0">
+                        <OutputPanel
+                            isFullScreen={false}
+                            activeOutputTab={activeOutputTab}
+                            onTabChange={(tab) => setWorkshopState(p => ({ ...p, activeOutputTab: tab }))}
+                            onRefreshPreview={() => setPreviewKey(Date.now())}
+                            onExitFullscreen={handleExitFullscreen}
+                            previewFile={previewFile}
+                            previewSrcDoc={previewSrcDoc}
+                            terminalOutput={terminalOutput}
+                            consoleMessages={consoleMessages}
+                            onClearConsole={() => setWorkshopState(prev => ({...prev, consoleMessages: []}))}
+                        />
+                    </div>
                 )}
             </div>
             
@@ -835,7 +888,20 @@ The available actions are: "CREATE_FILE", "UPDATE_FILE", "DELETE_FILE", "RENAME_
             </Card>
         </div>
     </div>
-    {isPreviewFullscreen && <div className="fixed inset-0 z-50 flex flex-col bg-background p-4"><OutputPanel isFullScreen={true} /></div>}
+    {isPreviewFullscreen && <div className="fixed inset-0 z-50 flex flex-col bg-background p-4">
+        <OutputPanel 
+            isFullScreen={true}
+            activeOutputTab={activeOutputTab}
+            onTabChange={(tab) => setWorkshopState(p => ({ ...p, activeOutputTab: tab }))}
+            onRefreshPreview={() => setPreviewKey(Date.now())}
+            onExitFullscreen={handleExitFullscreen}
+            previewFile={previewFile}
+            previewSrcDoc={previewSrcDoc}
+            terminalOutput={terminalOutput}
+            consoleMessages={consoleMessages}
+            onClearConsole={() => setWorkshopState(prev => ({...prev, consoleMessages: []}))}
+        />
+        </div>}
     </>
   );
 };
